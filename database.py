@@ -14,10 +14,12 @@ def init_db():
         country TEXT NOT NULL,
         city TEXT,
         status TEXT NOT NULL CHECK (status IN ('visited','wishlist')),
+        budget NUMERIC,
         start_date TEXT,
         end_date TEXT,
         notes TEXT
     );
+    ALTER TABLE trips ADD COLUMN IF NOT EXISTS budget NUMERIC;
 
     CREATE TABLE IF NOT EXISTS user_state (
         user_id BIGINT PRIMARY KEY,
@@ -41,10 +43,14 @@ def init_db():
         price TEXT,
         rating INTEGER,
         address TEXT,
+        latitude DOUBLE PRECISION,
+        longitude DOUBLE PRECISION,
         link TEXT,
         photo_file_id TEXT,
         notes TEXT
     );
+    ALTER TABLE places ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
+    ALTER TABLE places ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
 
     CREATE TABLE IF NOT EXISTS contacts (
         id SERIAL PRIMARY KEY,
@@ -61,7 +67,18 @@ def init_db():
         amount NUMERIC NOT NULL,
         currency TEXT DEFAULT 'so''m',
         expense_date TEXT,
+        place_id INTEGER REFERENCES places(id) ON DELETE SET NULL,
         note TEXT
+    );
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS place_id INTEGER REFERENCES places(id) ON DELETE SET NULL;
+
+    CREATE TABLE IF NOT EXISTS files (
+        id SERIAL PRIMARY KEY,
+        trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+        file_id TEXT NOT NULL,
+        file_type TEXT NOT NULL DEFAULT 'document',
+        file_name TEXT,
+        notes TEXT
     );
     """
     with get_conn() as conn:
@@ -101,11 +118,11 @@ def _run(query, params=()):
 
 # ---------- Trips ----------
 
-def add_trip(user_id, country, city, status, start_date=None, end_date=None, notes=None):
+def add_trip(user_id, country, city, status, budget=None, start_date=None, end_date=None, notes=None):
     row = _one(
-        "INSERT INTO trips (user_id, country, city, status, start_date, end_date, notes) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-        (user_id, country, city, status, start_date, end_date, notes),
+        "INSERT INTO trips (user_id, country, city, status, budget, start_date, end_date, notes) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+        (user_id, country, city, status, budget, start_date, end_date, notes),
     )
     return row["id"]
 
@@ -150,11 +167,11 @@ def get_diary(trip_id):
 
 # ---------- Places ----------
 
-def add_place(trip_id, name, ptype, is_halal, price, rating, address, link, notes):
+def add_place(trip_id, name, ptype, is_halal, price, rating, address, latitude, longitude, photo_file_id, notes):
     _run(
-        "INSERT INTO places (trip_id, name, type, is_halal, price, rating, address, link, notes) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-        (trip_id, name, ptype, is_halal, price, rating, address, link, notes),
+        "INSERT INTO places (trip_id, name, type, is_halal, price, rating, address, latitude, longitude, "
+        "photo_file_id, notes) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (trip_id, name, ptype, is_halal, price, rating, address, latitude, longitude, photo_file_id, notes),
     )
 
 
@@ -179,11 +196,11 @@ def get_contacts(trip_id):
 
 # ---------- Expenses ----------
 
-def add_expense(trip_id, category, amount, currency, expense_date, note):
+def add_expense(trip_id, category, amount, currency, expense_date, place_id, note):
     _run(
-        "INSERT INTO expenses (trip_id, category, amount, currency, expense_date, note) "
-        "VALUES (%s,%s,%s,%s,%s,%s)",
-        (trip_id, category, amount, currency, expense_date, note),
+        "INSERT INTO expenses (trip_id, category, amount, currency, expense_date, place_id, note) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+        (trip_id, category, amount, currency, expense_date, place_id, note),
     )
 
 
@@ -197,6 +214,19 @@ def get_expense_summary(trip_id):
         "WHERE trip_id=%s GROUP BY category, currency",
         (trip_id,),
     )
+
+
+# ---------- Files ----------
+
+def add_file(trip_id, file_id, file_type, file_name, notes):
+    _run(
+        "INSERT INTO files (trip_id, file_id, file_type, file_name, notes) VALUES (%s,%s,%s,%s,%s)",
+        (trip_id, file_id, file_type, file_name, notes),
+    )
+
+
+def get_files(trip_id):
+    return _all("SELECT * FROM files WHERE trip_id=%s ORDER BY id DESC", (trip_id,))
 
 
 # ---------- Stats ----------
@@ -221,10 +251,22 @@ def get_stats(user_id):
         "WHERE t.user_id=%s GROUP BY e.category ORDER BY total DESC LIMIT 1",
         (user_id,),
     )
+    most_expensive = _one(
+        "SELECT t.country, t.city, SUM(e.amount) total FROM trips t JOIN expenses e ON e.trip_id=t.id "
+        "WHERE t.user_id=%s GROUP BY t.id, t.country, t.city ORDER BY total DESC LIMIT 1",
+        (user_id,),
+    )
+    cheapest = _one(
+        "SELECT t.country, t.city, SUM(e.amount) total FROM trips t JOIN expenses e ON e.trip_id=t.id "
+        "WHERE t.user_id=%s GROUP BY t.id, t.country, t.city ORDER BY total ASC LIMIT 1",
+        (user_id,),
+    )
     return {
         "visited_count": visited_count,
         "wishlist_count": wishlist_count,
         "total_spent": total_spent,
         "places_count": places_count,
         "top_category": dict(top_category) if top_category else None,
+        "most_expensive": dict(most_expensive) if most_expensive else None,
+        "cheapest": dict(cheapest) if cheapest else None,
     }

@@ -5,6 +5,7 @@ class TripAdd(StatesGroup):
     country = State()
     city = State()
     status = State()
+    budget = State()
     notes = State()
 
 
@@ -18,7 +19,8 @@ class PlaceAdd(StatesGroup):
     halal = State()
     price = State()
     rating = State()
-    address = State()
+    location = State()
+    photo = State()
     notes = State()
 
 
@@ -31,4 +33,10 @@ class ContactAdd(StatesGroup):
 class ExpenseAdd(StatesGroup):
     category = State()
     amount = State()
+    place = State()
     note = State()
+
+
+class FileAdd(StatesGroup):
+    file = State()
+    notes = State()

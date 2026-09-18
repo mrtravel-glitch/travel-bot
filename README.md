@@ -70,6 +70,9 @@ Render bepul tarifi 15 daqiqa so'rovsiz qolsa "uxlab qoladi". Buning oldini olis
 
 ## Mavjud komandalar
 
-`/start`, `/help`, `/trip_add`, `/trips`, `/trip`, `/diary_add`, `/diary`,
-`/place_add`, `/places`, `/contact_add`, `/contacts`, `/expense_add`,
-`/expenses`, `/stats`, `/cancel`
+`/start`, `/help`, `/trip_add` (byudjet bilan), `/trips` (tanlaganda to'liq
+ma'lumot chiqadi), `/trip`, `/diary_add`, `/diary`, `/place_add` (lokatsiya
++ rasm bilan), `/places`, `/contact_add`, `/contacts`, `/expense_add`
+(joyga bog'lash bilan), `/expenses` (byudjet bilan solishtirish),
+`/file_add`, `/files`, `/weather`, `/stats` (eng qimmat/arzon safar bilan),
+`/cancel`

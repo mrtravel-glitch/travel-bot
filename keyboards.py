@@ -59,3 +59,18 @@ def category_kb():
         b.button(text=c, callback_data=f"cat:{c}")
     b.adjust(2)
     return b.as_markup()
+
+
+def places_link_kb(places):
+    b = InlineKeyboardBuilder()
+    for p in places:
+        b.button(text=p["name"], callback_data=f"link_place:{p['id']}")
+    b.button(text="Bog'lamaslik ⏭", callback_data="link_place:none")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def weather_save_kb():
+    b = InlineKeyboardBuilder()
+    b.button(text="📔 Kundalikka saqlash", callback_data="save_weather")
+    return b.as_markup()
