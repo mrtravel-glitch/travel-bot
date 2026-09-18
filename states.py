@@ -15,12 +15,13 @@ class DiaryAdd(StatesGroup):
 
 class PlaceAdd(StatesGroup):
     name = State()
+    city = State()
     type = State()
     halal = State()
     price = State()
     rating = State()
     location = State()
-    photo = State()
+    photos = State()
     notes = State()
 
 

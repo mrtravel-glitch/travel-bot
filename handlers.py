@@ -4,7 +4,7 @@ import aiohttp
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InputMediaPhoto
 
 import database as db
 import keyboards as kb
@@ -321,8 +321,29 @@ async def place_add_start(message: Message, state: FSMContext):
 @router.message(PlaceAdd.name)
 async def place_add_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
+    await state.set_state(PlaceAdd.city)
+    trip = db.get_active_trip(message.from_user.id)
+    default_city = trip["city"] or "shahar belgilanmagan"
+    await message.answer(
+        f"🏙 Qaysi shahar uchun? (o'tkazib yuborsangiz — {default_city})",
+        reply_markup=kb.skip_kb("skip_place_city"),
+    )
+
+
+@router.message(PlaceAdd.city)
+async def place_add_city(message: Message, state: FSMContext):
+    await state.update_data(city=message.text.strip())
     await state.set_state(PlaceAdd.type)
     await message.answer("Turi qanday?", reply_markup=kb.place_type_kb())
+
+
+@router.callback_query(PlaceAdd.city, F.data == "skip_place_city")
+async def place_add_city_skip(callback: CallbackQuery, state: FSMContext):
+    trip = db.get_active_trip(callback.from_user.id)
+    await state.update_data(city=trip["city"])
+    await state.set_state(PlaceAdd.type)
+    await callback.message.edit_text("Turi qanday?", reply_markup=kb.place_type_kb())
+    await callback.answer()
 
 
 @router.callback_query(PlaceAdd.type, F.data.startswith("ptype:"))
@@ -377,11 +398,19 @@ async def place_add_rating(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+PHOTOS_PROMPT = "📸 Rasm(lar) yuboring — bir nechtasini ketma-ket yuborishingiz mumkin. Tugagach tugmani bosing:"
+
+
+async def _go_to_photos(state: FSMContext, answer_func):
+    await state.update_data(photos=[])
+    await state.set_state(PlaceAdd.photos)
+    await answer_func(PHOTOS_PROMPT, reply_markup=kb.done_kb("photos_done"))
+
+
 @router.message(PlaceAdd.location, F.location)
 async def place_add_location_geo(message: Message, state: FSMContext):
     await state.update_data(address=None, latitude=message.location.latitude, longitude=message.location.longitude)
-    await state.set_state(PlaceAdd.photo)
-    await message.answer("📸 Rasm yuboring:", reply_markup=kb.skip_kb("skip_photo"))
+    await _go_to_photos(state, message.answer)
 
 
 @router.message(PlaceAdd.location, F.venue)
@@ -390,35 +419,36 @@ async def place_add_location_venue(message: Message, state: FSMContext):
     await state.update_data(
         address=v.address or v.title, latitude=v.location.latitude, longitude=v.location.longitude
     )
-    await state.set_state(PlaceAdd.photo)
-    await message.answer("📸 Rasm yuboring:", reply_markup=kb.skip_kb("skip_photo"))
+    await _go_to_photos(state, message.answer)
 
 
 @router.message(PlaceAdd.location, F.text)
 async def place_add_location_text(message: Message, state: FSMContext):
     await state.update_data(address=message.text.strip(), latitude=None, longitude=None)
-    await state.set_state(PlaceAdd.photo)
-    await message.answer("📸 Rasm yuboring:", reply_markup=kb.skip_kb("skip_photo"))
+    await _go_to_photos(state, message.answer)
 
 
 @router.callback_query(PlaceAdd.location, F.data == "skip_location")
 async def place_add_location_skip(callback: CallbackQuery, state: FSMContext):
     await state.update_data(address=None, latitude=None, longitude=None)
-    await state.set_state(PlaceAdd.photo)
-    await callback.message.edit_text("📸 Rasm yuboring:", reply_markup=kb.skip_kb("skip_photo"))
+    await _go_to_photos(state, callback.message.edit_text)
     await callback.answer()
 
 
-@router.message(PlaceAdd.photo, F.photo)
+@router.message(PlaceAdd.photos, F.photo)
 async def place_add_photo(message: Message, state: FSMContext):
-    await state.update_data(photo_file_id=message.photo[-1].file_id)
-    await state.set_state(PlaceAdd.notes)
-    await message.answer("📝 Izoh:", reply_markup=kb.skip_kb("skip_place_notes"))
+    data = await state.get_data()
+    photos = data.get("photos", [])
+    photos.append(message.photo[-1].file_id)
+    await state.update_data(photos=photos)
+    await message.answer(
+        f"📸 Qabul qilindi ({len(photos)} ta). Yana yuboring yoki tugating:",
+        reply_markup=kb.done_kb("photos_done"),
+    )
 
 
-@router.callback_query(PlaceAdd.photo, F.data == "skip_photo")
-async def place_add_photo_skip(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(photo_file_id=None)
+@router.callback_query(PlaceAdd.photos, F.data == "photos_done")
+async def place_add_photos_done(callback: CallbackQuery, state: FSMContext):
     await state.set_state(PlaceAdd.notes)
     await callback.message.edit_text("📝 Izoh:", reply_markup=kb.skip_kb("skip_place_notes"))
     await callback.answer()
@@ -438,13 +468,49 @@ async def place_add_notes_skip(callback: CallbackQuery, state: FSMContext):
 async def _finish_place_add(user_id, state, notes, answer_func):
     data = await state.get_data()
     trip = db.get_active_trip(user_id)
-    db.add_place(
-        trip["id"], data["name"], data["type"], data.get("is_halal"),
+    place_id = db.add_place(
+        trip["id"], data["name"], data["type"], data.get("city"), data.get("is_halal"),
         data.get("price"), data.get("rating"), data.get("address"),
-        data.get("latitude"), data.get("longitude"), data.get("photo_file_id"), notes,
+        data.get("latitude"), data.get("longitude"), notes,
     )
+    for photo_id in data.get("photos", []):
+        db.add_place_photo(place_id, photo_id)
     await state.clear()
-    await answer_func(f"✅ Saqlandi: {data['name']} ({TYPE_NAMES.get(data['type'], data['type'])})")
+    photo_note = f", {len(data.get('photos', []))} ta rasm" if data.get("photos") else ""
+    await answer_func(f"✅ Saqlandi: {data['name']} ({TYPE_NAMES.get(data['type'], data['type'])}{photo_note})")
+
+
+def _place_line(p):
+    emoji = {"hotel": "🏨", "restaurant": "🍽", "attraction": "🏛"}.get(p["type"], "📍")
+    line = f"{emoji} <b>{p['name']}</b>"
+    if p["city"]:
+        line += f" — {p['city']}"
+    if p["type"] == "restaurant" and p["is_halal"] is not None:
+        line += " ✅halol" if p["is_halal"] else " ❌nohalol"
+    if p["price"]:
+        line += f" — {p['price']}"
+    if p["rating"]:
+        line += " " + "⭐" * p["rating"]
+    if p["address"]:
+        line += f"\n📌 {p['address']}"
+    if p["latitude"] and p["longitude"]:
+        line += f"\n🗺 https://maps.google.com/?q={p['latitude']},{p['longitude']}"
+    if p["notes"]:
+        line += f"\n📝 {p['notes']}"
+    return line
+
+
+async def _send_place(bot_message_target, p):
+    line = _place_line(p)
+    photos = db.get_place_photos(p["id"])
+    if not photos:
+        await bot_message_target.answer(line)
+    elif len(photos) == 1:
+        await bot_message_target.answer_photo(photos[0]["photo_file_id"], caption=line)
+    else:
+        media = [InputMediaPhoto(media=photos[0]["photo_file_id"], caption=line)]
+        media += [InputMediaPhoto(media=ph["photo_file_id"]) for ph in photos[1:10]]
+        await bot_message_target.answer_media_group(media)
 
 
 @router.message(Command("places"))
@@ -456,25 +522,35 @@ async def cmd_places(message: Message):
     if not places:
         await message.answer("Bu safar uchun hali joylar qo'shilmagan.")
         return
+    cities = db.get_trip_cities(trip["id"])
+    if len(cities) > 1:
+        await message.answer("Qaysi shahar?", reply_markup=kb.city_filter_kb(cities))
+    else:
+        city = cities[0] if cities else "all"
+        await message.answer("Qaysi turi?", reply_markup=kb.type_filter_kb(city))
+
+
+@router.callback_query(F.data.startswith("places_city:"))
+async def cb_places_city(callback: CallbackQuery):
+    city = callback.data.split(":", 1)[1]
+    await callback.message.edit_text("Qaysi turi?", reply_markup=kb.type_filter_kb(city))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("places_show:"))
+async def cb_places_show(callback: CallbackQuery):
+    _, city, ptype = callback.data.split(":", 2)
+    trip = db.get_active_trip(callback.from_user.id)
+    city_filter = None if city == "all" else city
+    type_filter = None if ptype == "all" else ptype
+    places = db.get_places(trip["id"], city=city_filter, ptype=type_filter)
+    await callback.answer()
+    if not places:
+        await callback.message.edit_text("Bu filtr bo'yicha joylar topilmadi.")
+        return
+    await callback.message.delete()
     for p in places:
-        emoji = {"hotel": "🏨", "restaurant": "🍽", "attraction": "🏛"}.get(p["type"], "📍")
-        line = f"{emoji} <b>{p['name']}</b>"
-        if p["type"] == "restaurant" and p["is_halal"] is not None:
-            line += " ✅halol" if p["is_halal"] else " ❌nohalol"
-        if p["price"]:
-            line += f" — {p['price']}"
-        if p["rating"]:
-            line += " " + "⭐" * p["rating"]
-        if p["address"]:
-            line += f"\n📌 {p['address']}"
-        if p["latitude"] and p["longitude"]:
-            line += f"\n🗺 https://maps.google.com/?q={p['latitude']},{p['longitude']}"
-        if p["notes"]:
-            line += f"\n📝 {p['notes']}"
-        if p["photo_file_id"]:
-            await message.answer_photo(p["photo_file_id"], caption=line)
-        else:
-            await message.answer(line)
+        await _send_place(callback.message, p)
 
 
 # ================= CONTACTS =================

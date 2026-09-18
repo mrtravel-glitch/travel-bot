@@ -7,6 +7,12 @@ def skip_kb(callback_data):
     return b.as_markup()
 
 
+def done_kb(callback_data, text="✅ Tugatdim"):
+    b = InlineKeyboardBuilder()
+    b.button(text=text, callback_data=callback_data)
+    return b.as_markup()
+
+
 def status_kb():
     b = InlineKeyboardBuilder()
     b.button(text="✅ Borgan", callback_data="status:visited")
@@ -64,7 +70,8 @@ def category_kb():
 def places_link_kb(places):
     b = InlineKeyboardBuilder()
     for p in places:
-        b.button(text=p["name"], callback_data=f"link_place:{p['id']}")
+        label = f"{p['name']} ({p['city']})" if p["city"] else p["name"]
+        b.button(text=label, callback_data=f"link_place:{p['id']}")
     b.button(text="Bog'lamaslik ⏭", callback_data="link_place:none")
     b.adjust(1)
     return b.as_markup()
@@ -73,4 +80,23 @@ def places_link_kb(places):
 def weather_save_kb():
     b = InlineKeyboardBuilder()
     b.button(text="📔 Kundalikka saqlash", callback_data="save_weather")
+    return b.as_markup()
+
+
+def city_filter_kb(cities):
+    b = InlineKeyboardBuilder()
+    for c in cities:
+        b.button(text=f"🏙 {c}", callback_data=f"places_city:{c}")
+    b.button(text="🌍 Barchasi", callback_data="places_city:all")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def type_filter_kb(city):
+    b = InlineKeyboardBuilder()
+    b.button(text="🏨 Mehmonxona", callback_data=f"places_show:{city}:hotel")
+    b.button(text="🍽 Restoran", callback_data=f"places_show:{city}:restaurant")
+    b.button(text="🏛 Ko'rish joyi", callback_data=f"places_show:{city}:attraction")
+    b.button(text="📋 Barchasi", callback_data=f"places_show:{city}:all")
+    b.adjust(1)
     return b.as_markup()

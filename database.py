@@ -39,6 +39,7 @@ def init_db():
         trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
         name TEXT NOT NULL,
         type TEXT NOT NULL,
+        city TEXT,
         is_halal BOOLEAN,
         price TEXT,
         rating INTEGER,
@@ -51,6 +52,13 @@ def init_db():
     );
     ALTER TABLE places ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
     ALTER TABLE places ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
+    ALTER TABLE places ADD COLUMN IF NOT EXISTS city TEXT;
+
+    CREATE TABLE IF NOT EXISTS place_photos (
+        id SERIAL PRIMARY KEY,
+        place_id INTEGER NOT NULL REFERENCES places(id) ON DELETE CASCADE,
+        photo_file_id TEXT NOT NULL
+    );
 
     CREATE TABLE IF NOT EXISTS contacts (
         id SERIAL PRIMARY KEY,
@@ -167,18 +175,41 @@ def get_diary(trip_id):
 
 # ---------- Places ----------
 
-def add_place(trip_id, name, ptype, is_halal, price, rating, address, latitude, longitude, photo_file_id, notes):
-    _run(
-        "INSERT INTO places (trip_id, name, type, is_halal, price, rating, address, latitude, longitude, "
-        "photo_file_id, notes) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-        (trip_id, name, ptype, is_halal, price, rating, address, latitude, longitude, photo_file_id, notes),
+def add_place(trip_id, name, ptype, city, is_halal, price, rating, address, latitude, longitude, notes):
+    row = _one(
+        "INSERT INTO places (trip_id, name, type, city, is_halal, price, rating, address, latitude, longitude, "
+        "notes) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+        (trip_id, name, ptype, city, is_halal, price, rating, address, latitude, longitude, notes),
     )
+    return row["id"]
 
 
-def get_places(trip_id, ptype=None):
+def get_places(trip_id, city=None, ptype=None):
+    query = "SELECT * FROM places WHERE trip_id=%s"
+    params = [trip_id]
+    if city:
+        query += " AND city=%s"
+        params.append(city)
     if ptype:
-        return _all("SELECT * FROM places WHERE trip_id=%s AND type=%s ORDER BY id DESC", (trip_id, ptype))
-    return _all("SELECT * FROM places WHERE trip_id=%s ORDER BY id DESC", (trip_id,))
+        query += " AND type=%s"
+        params.append(ptype)
+    query += " ORDER BY id DESC"
+    return _all(query, tuple(params))
+
+
+def get_trip_cities(trip_id):
+    rows = _all(
+        "SELECT DISTINCT city FROM places WHERE trip_id=%s AND city IS NOT NULL ORDER BY city", (trip_id,)
+    )
+    return [r["city"] for r in rows]
+
+
+def add_place_photo(place_id, photo_file_id):
+    _run("INSERT INTO place_photos (place_id, photo_file_id) VALUES (%s,%s)", (place_id, photo_file_id))
+
+
+def get_place_photos(place_id):
+    return _all("SELECT * FROM place_photos WHERE place_id=%s ORDER BY id", (place_id,))
 
 
 # ---------- Contacts ----------
