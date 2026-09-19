@@ -21,12 +21,23 @@ def status_kb():
     return b.as_markup()
 
 
-def trips_kb(trips):
+def country_select_kb(countries, prefix, show_add=True):
     b = InlineKeyboardBuilder()
-    for t in trips:
-        emoji = "✅" if t["status"] == "visited" else "🎯"
-        label = f"{emoji} {t['country']}" + (f", {t['city']}" if t["city"] else "")
-        b.button(text=label, callback_data=f"select_trip:{t['id']}")
+    for c in countries:
+        emoji = "✅" if c["status"] == "visited" else "🎯"
+        b.button(text=f"{emoji} {c['name']}", callback_data=f"{prefix}:{c['id']}")
+    if show_add:
+        b.button(text="➕ Yangi davlat qo'shish", callback_data=f"{prefix}:new")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def city_select_kb(cities, prefix, show_add=True):
+    b = InlineKeyboardBuilder()
+    for c in cities:
+        b.button(text=f"🏙 {c['name']}", callback_data=f"{prefix}:{c['id']}")
+    if show_add:
+        b.button(text="➕ Yangi shahar qo'shish", callback_data=f"{prefix}:new")
     b.adjust(1)
     return b.as_markup()
 
@@ -70,8 +81,7 @@ def category_kb():
 def places_link_kb(places):
     b = InlineKeyboardBuilder()
     for p in places:
-        label = f"{p['name']} ({p['city']})" if p["city"] else p["name"]
-        b.button(text=label, callback_data=f"link_place:{p['id']}")
+        b.button(text=p["name"], callback_data=f"link_place:{p['id']}")
     b.button(text="Bog'lamaslik ⏭", callback_data="link_place:none")
     b.adjust(1)
     return b.as_markup()
@@ -83,20 +93,11 @@ def weather_save_kb():
     return b.as_markup()
 
 
-def city_filter_kb(cities):
+def type_filter_kb():
     b = InlineKeyboardBuilder()
-    for c in cities:
-        b.button(text=f"🏙 {c}", callback_data=f"places_city:{c}")
-    b.button(text="🌍 Barchasi", callback_data="places_city:all")
-    b.adjust(1)
-    return b.as_markup()
-
-
-def type_filter_kb(city):
-    b = InlineKeyboardBuilder()
-    b.button(text="🏨 Mehmonxona", callback_data=f"places_show:{city}:hotel")
-    b.button(text="🍽 Restoran", callback_data=f"places_show:{city}:restaurant")
-    b.button(text="🏛 Ko'rish joyi", callback_data=f"places_show:{city}:attraction")
-    b.button(text="📋 Barchasi", callback_data=f"places_show:{city}:all")
+    b.button(text="🏨 Mehmonxona", callback_data="places_show:hotel")
+    b.button(text="🍽 Restoran", callback_data="places_show:restaurant")
+    b.button(text="🏛 Ko'rish joyi", callback_data="places_show:attraction")
+    b.button(text="📋 Barchasi", callback_data="places_show:all")
     b.adjust(1)
     return b.as_markup()
