@@ -22,7 +22,14 @@ def init_db():
     CREATE TABLE IF NOT EXISTS cities (
         id SERIAL PRIMARY KEY,
         country_id INTEGER NOT NULL REFERENCES countries(id) ON DELETE CASCADE,
-        name TEXT NOT NULL
+        name TEXT NOT NULL,
+        budget NUMERIC,
+        budget_period TEXT,
+        budget_currency TEXT DEFAULT 'UZS'
+    );
+
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+        name TEXT PRIMARY KEY
     );
 
     CREATE TABLE IF NOT EXISTS user_state (
@@ -99,11 +106,26 @@ def init_db():
     -- Eski bazalar uchun: har safar xavfsiz ishlaydi, malumotlarni ochirmaydi
     ALTER TABLE countries ADD COLUMN IF NOT EXISTS budget_currency TEXT DEFAULT 'UZS';
     UPDATE countries SET budget_currency='UZS' WHERE budget_currency IS NULL;
+    ALTER TABLE cities ADD COLUMN IF NOT EXISTS budget NUMERIC;
+    ALTER TABLE cities ADD COLUMN IF NOT EXISTS budget_period TEXT;
+    ALTER TABLE cities ADD COLUMN IF NOT EXISTS budget_currency TEXT DEFAULT 'UZS';
     UPDATE expenses SET currency='UZS' WHERE currency IS NULL OR currency='so''m';
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(ddl)
+            # Eski davlat byudjetini bir marta shaharga koshamiz (faqat 1 ta shahari bor davlatlar uchun;
+            # bir nechta shahari borlarini foydalanuvchi /budget orqali ozi taqsimlaydi)
+            cur.execute("SELECT 1 FROM schema_migrations WHERE name=%s", ("city_budget_v1",))
+            if not cur.fetchone():
+                cur.execute(
+                    "UPDATE cities SET budget=co.budget, budget_period=co.budget_period, "
+                    "budget_currency=COALESCE(co.budget_currency, 'UZS') "
+                    "FROM countries co WHERE cities.country_id=co.id AND cities.budget IS NULL "
+                    "AND co.budget IS NOT NULL "
+                    "AND (SELECT COUNT(*) FROM cities c2 WHERE c2.country_id=co.id) = 1"
+                )
+                cur.execute("INSERT INTO schema_migrations (name) VALUES (%s)", ("city_budget_v1",))
 
 
 @contextmanager
@@ -138,11 +160,10 @@ def _run(query, params=()):
 
 # ---------- Countries ----------
 
-def add_country(user_id, name, status, budget=None, budget_period=None, notes=None, budget_currency="UZS"):
+def add_country(user_id, name, status, notes=None):
     row = _one(
-        "INSERT INTO countries (user_id, name, status, budget, budget_period, notes, budget_currency) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-        (user_id, name, status, budget, budget_period, notes, budget_currency or "UZS"),
+        "INSERT INTO countries (user_id, name, status, notes) VALUES (%s,%s,%s,%s) RETURNING id",
+        (user_id, name, status, notes),
     )
     return row["id"]
 
@@ -206,6 +227,14 @@ def get_cities(country_id):
 
 def get_city(city_id):
     return _one("SELECT * FROM cities WHERE id=%s", (city_id,))
+
+
+def set_city_budget(city_id, budget, currency, period):
+    """Shahar byudjetini belgilaydi. budget=None bo'lsa byudjet olib tashlanadi."""
+    _run(
+        "UPDATE cities SET budget=%s, budget_currency=%s, budget_period=%s WHERE id=%s",
+        (budget, currency or "UZS", period, city_id),
+    )
 
 
 # ---------- Active state ----------

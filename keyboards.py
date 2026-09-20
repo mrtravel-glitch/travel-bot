@@ -111,6 +111,12 @@ def places_link_kb(places):
     return b.as_markup()
 
 
+def budget_clear_kb():
+    b = InlineKeyboardBuilder()
+    b.button(text="🗑 Byudjetni olib tashlash", callback_data="budget_clear")
+    return b.as_markup()
+
+
 def currency_kb():
     b = InlineKeyboardBuilder()
     b.button(text="🇺🇿 So'm", callback_data="cur:UZS")

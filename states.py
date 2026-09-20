@@ -14,13 +14,17 @@ class TripAdd(StatesGroup):
     select_country = State()
     new_country_name = State()
     status = State()
-    budget = State()
-    budget_currency = State()
-    budget_currency_other = State()
-    budget_period = State()
     notes = State()
     select_city = State()
     new_city_name = State()
+
+
+class BudgetSet(StatesGroup):
+    """Shahar byudjetini belgilash (yangi shahar qo'shilganda ham, /budget da ham)."""
+    amount = State()
+    currency = State()
+    currency_other = State()
+    period = State()
 
 
 class TripsNewCity(StatesGroup):
