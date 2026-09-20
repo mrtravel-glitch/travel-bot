@@ -1,5 +1,7 @@
+import asyncio
+import logging
 import re
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from html import escape
 
 import aiohttp
@@ -10,8 +12,11 @@ from aiogram.types import Message, CallbackQuery, InputMediaPhoto
 
 import database as db
 import keyboards as kb
-from states import Pick, TripAdd, TripsNewCity, DiaryAdd, PlaceAdd, ContactAdd, ExpenseAdd, FileAdd
+from states import (
+    Pick, TripAdd, TripsNewCity, DiaryAdd, PlaceAdd, ContactAdd, ExpenseAdd, FileAdd, WeatherAdd,
+)
 
+log = logging.getLogger(__name__)
 router = Router()
 
 TYPE_NAMES = {"hotel": "🏨 Mehmonxona", "restaurant": "🍽 Restoran", "attraction": "🏛 Ko'rish joyi"}
@@ -20,17 +25,144 @@ WEATHER_CODES = {
     0: "☀️ Ochiq osmon", 1: "🌤 Deyarli ochiq", 2: "⛅ Qisman bulutli", 3: "☁️ Bulutli",
     45: "🌫 Tuman", 48: "🌫 Muzli tuman",
     51: "🌦 Yengil yomg'ir", 53: "🌦 Yomg'ir", 55: "🌧 Kuchli yomg'ir",
+    56: "🌧 Muzlovchi yomg'ir", 57: "🌧 Muzlovchi yomg'ir",
     61: "🌧 Yomg'ir", 63: "🌧 Yomg'ir", 65: "🌧 Kuchli yomg'ir",
-    71: "🌨 Qor", 73: "🌨 Qor", 75: "❄️ Kuchli qor",
+    66: "🌧 Muzlovchi yomg'ir", 67: "🌧 Muzlovchi yomg'ir",
+    71: "🌨 Qor", 73: "🌨 Qor", 75: "❄️ Kuchli qor", 77: "🌨 Qor donalari",
     80: "🌦 Jala", 81: "🌦 Jala", 82: "⛈ Kuchli jala",
-    95: "⛈ Momaqaldiroq",
+    85: "🌨 Qor", 86: "❄️ Kuchli qor",
+    95: "⛈ Momaqaldiroq", 96: "⛈ Do'lli momaqaldiroq", 99: "⛈ Do'lli momaqaldiroq",
 }
 
+# (foydalanuvchi, shahar) -> oxirgi olingan ob-havo (yozuvga saqlash tugmasi uchun)
 weather_cache = {}
+
+SEP = "━━━━━━━━━━━━━━━"
+VALID_STATUSES = ("visited", "wishlist")
+
+
+# ================= YORDAMCHI FUNKSIYALAR =================
+
+def esc(value):
+    """Foydalanuvchi matnini HTML xabar uchun xavfsiz qiladi (< > & belgilari xabarni buzmasin)."""
+    return escape(str(value), quote=False) if value is not None else ""
+
+
+def cut(text, limit):
+    text = str(text)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+# Server UTC da ishlaydi, sana esa O'zbekiston vaqti (UTC+5) bo'yicha olinadi
+UZ_TZ = timezone(timedelta(hours=5))
+
+
+def today():
+    return datetime.now(UZ_TZ).date()
+
+
+UZ_MONTHS = [
+    "yanvar", "fevral", "mart", "aprel", "may", "iyun",
+    "iyul", "avgust", "sentabr", "oktabr", "noyabr", "dekabr",
+]
+
+
+def fmt_date(value):
+    """'2026-09-20' -> '20 sentabr 2026'"""
+    try:
+        d = date.fromisoformat(str(value))
+    except ValueError:
+        return esc(value)
+    return f"{d.day} {UZ_MONTHS[d.month - 1]} {d.year}"
+
+
+def short_date(value):
+    """'2026-09-20' -> '20.09'"""
+    try:
+        return date.fromisoformat(str(value)).strftime("%d.%m")
+    except ValueError:
+        return esc(value)
+
+
+def parse_date(text):
+    """'15.09.2026', '15.09', '15/09/26', '2026-09-15' kabi kiritishlarni sanaga aylantiradi."""
+    t = (text or "").strip().replace("/", ".").replace("-", ".")
+    try:
+        m = re.fullmatch(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2}|\d{4}))?", t)
+        if m:
+            d, mo, y = m.groups()
+            y = int(y) if y else today().year
+            if y < 100:
+                y += 2000
+            return date(y, int(mo), int(d))
+        m = re.fullmatch(r"(\d{4})\.(\d{1,2})\.(\d{1,2})", t)
+        if m:
+            y, mo, d = m.groups()
+            return date(int(y), int(mo), int(d))
+    except ValueError:
+        return None
+    return None
+
+
+# ---------- Pul va valyuta ----------
+
+CURRENCY_SYMBOLS = {"UZS": "so'm", "USD": "$", "EUR": "€"}
+CURRENCY_ALIASES = {
+    "som": "UZS", "so'm": "UZS", "sum": "UZS", "uzs": "UZS",
+    "$": "USD", "usd": "USD", "dollar": "USD",
+    "€": "EUR", "eur": "EUR", "euro": "EUR", "evro": "EUR",
+}
+
+
+def normalize_currency(text):
+    """'usd', '$', 'evro', 'try' -> 'USD', 'USD', 'EUR', 'TRY'. Tushunilmasa None."""
+    t = (text or "").strip().lower().replace("’", "'").replace("ʻ", "'").replace("‘", "'")
+    if not t:
+        return None
+    if t in CURRENCY_ALIASES:
+        return CURRENCY_ALIASES[t]
+    if re.fullmatch(r"[a-z]{2,5}", t):
+        return t.upper()
+    return None
+
+
+def cur_sym(code):
+    code = code or "UZS"
+    return CURRENCY_SYMBOLS.get(code, code)
 
 
 def fmt_money(amount):
-    return f"{amount:,.0f}".replace(",", " ")
+    amount = float(amount)
+    if abs(amount - round(amount)) < 0.005:
+        return f"{amount:,.0f}".replace(",", " ")
+    return f"{amount:,.2f}".replace(",", " ")
+
+
+def fmt_num(value):
+    """24.0 -> '24', 24.5 -> '24.5'"""
+    return f"{float(value):.1f}".rstrip("0").rstrip(".")
+
+
+def fmt_amount(amount, code):
+    return f"{fmt_money(amount)} {cur_sym(code)}"
+
+
+CURRENCY_ORDER = {"UZS": 0, "USD": 1, "EUR": 2}
+
+
+def currency_key(code):
+    return (CURRENCY_ORDER.get(code, 3), code)
+
+
+def sort_by_currency(rows):
+    """So'm, dollar, evro birinchi; qolganlari alifbo bo'yicha. Valyuta ichidagi tartib saqlanadi."""
+    return sorted(rows, key=lambda r: currency_key(r["currency"]))
+
+
+def fmt_totals(rows):
+    """[{'currency': 'UZS', 'total': 3000000}, {'currency': 'USD', 'total': 250}] -> '3 000 000 so'm + 250 $'"""
+    parts = [fmt_amount(r["total"], r["currency"]) for r in sort_by_currency(rows) if r["total"]]
+    return " + ".join(parts) if parts else fmt_amount(0, "UZS")
 
 
 MONEY_MULTIPLIERS = [
@@ -43,7 +175,7 @@ BUDGET_PERIOD_LABELS = {"daily": "kunlik", "monthly": "oylik", "total": "umumiy"
 
 
 def parse_money(text):
-    """'3000000', '3 mln', '500 ming', '1.5 mlrd' kabi kiritishlarni raqamga aylantiradi."""
+    """'3000000', '3 mln', '500 ming', '1.5 mlrd', '1,5 mln', '12,50' kabi kiritishlarni raqamga aylantiradi."""
     if not text:
         return None
     t = text.strip().lower()
@@ -55,7 +187,10 @@ def parse_money(text):
             multiplier = mult
             t = pattern.sub("", t)
             break
-    t = t.replace(" ", "").replace(",", "")
+    t = t.replace(" ", "")
+    if re.fullmatch(r"\d+,\d{1,2}", t):  # "1,5" -> o'nlik kasr; "3,000,000" -> minglik ajratgich
+        t = t.replace(",", ".")
+    t = t.replace(",", "")
     t = re.sub(r"[^0-9.\-]", "", t)
     if not t or t in ("-", "."):
         return None
@@ -65,34 +200,97 @@ def parse_money(text):
         return None
 
 
+def parse_temp(text):
+    t = (text or "").strip().lower()
+    for junk in ("°c", "°", "c", " "):
+        t = t.replace(junk, "")
+    t = t.replace(",", ".")
+    try:
+        v = float(t)
+    except ValueError:
+        return None
+    return v if -90 <= v <= 60 else None
+
+
+# ---------- Egalik tekshiruvi (begona ID'lardan himoya) ----------
+
+def _int(val):
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def own_country(user_id, val):
+    cid = _int(val)
+    return db.get_country_owned(user_id, cid) if cid is not None else None
+
+
+def own_city(user_id, val, country_id=None):
+    cid = _int(val)
+    if cid is None:
+        return None
+    city = db.get_city_owned(user_id, cid)
+    if city and country_id is not None and city["country_id"] != country_id:
+        return None
+    return city
+
+
+def own_place(user_id, val, city_id=None):
+    pid = _int(val)
+    if pid is None:
+        return None
+    place = db.get_place_owned(user_id, pid)
+    if place and city_id is not None and place["city_id"] != city_id:
+        return None
+    return place
+
+
+NOT_FOUND = "Topilmadi"
+
+
+# ---------- Byudjet va profil ----------
+
+def _budget_lines(country, country_totals):
+    if not country["budget"]:
+        return []
+    bcur = country.get("budget_currency") or "UZS"
+    spent = {r["currency"]: float(r["total"]) for r in country_totals}
+    period = BUDGET_PERIOD_LABELS.get(country.get("budget_period") or "total", "umumiy")
+    qoldiq = float(country["budget"]) - spent.get(bcur, 0)
+    holat = "✅" if qoldiq >= 0 else "⚠️"
+    lines = [
+        f"🎯 Byudjet: {fmt_amount(country['budget'], bcur)} ({period})",
+        f"{holat} Qoldiq: {fmt_amount(qoldiq, bcur)}",
+    ]
+    others = [r for r in country_totals if r["currency"] != bcur]
+    if others:
+        lines.append(f"ℹ️ Boshqa valyutadagi xarajatlar byudjetga hisoblanmagan: {fmt_totals(others)}")
+    return lines
+
+
 def build_city_profile(country, city):
     emoji = "✅" if country["status"] == "visited" else "🎯"
-    text = f"{emoji} <b>{country['name']}</b> — 🏙 {city['name']}"
+    text = f"{emoji} <b>{esc(country['name'])}</b> — 🏙 {esc(city['name'])}"
     if country["notes"]:
-        text += f"\n📝 {country['notes']}"
+        text += f"\n📝 {esc(country['notes'])}"
 
     places = db.get_places(city["id"])
     diary = db.get_diary(city["id"])
     contacts = db.get_contacts(city["id"])
     files = db.get_files(city["id"])
-    city_summary = db.get_expense_summary(city["id"])
-    city_total = sum(r["total"] for r in city_summary) if city_summary else 0
-    country_total = db.get_country_expense_total(country["id"])
+    city_totals = db.get_city_expense_totals(city["id"])
+    country_totals = db.get_country_expense_totals(country["id"])
 
     text += (
         f"\n\n📍 Joylar: {len(places)}\n📔 Kundalik: {len(diary)}\n"
         f"👤 Kontaktlar: {len(contacts)}\n📎 Fayllar: {len(files)}\n"
-        f"💰 Shu shahar xarajati: {fmt_money(city_total)} so'm\n"
-        f"🌍 {country['name']} bo'yicha jami: {fmt_money(country_total)} so'm"
+        f"💰 Shu shahar xarajati: {fmt_totals(city_totals)}\n"
+        f"🌍 {esc(country['name'])} bo'yicha jami: {fmt_totals(country_totals)}"
     )
-    if country["budget"]:
-        period = BUDGET_PERIOD_LABELS.get(country.get("budget_period") or "total", "umumiy")
-        qoldiq = float(country["budget"]) - country_total
-        holat = "✅" if qoldiq >= 0 else "⚠️"
-        text += (
-            f"\n🎯 Byudjet: {fmt_money(country['budget'])} so'm ({period})"
-            f"\n{holat} Qoldiq: {fmt_money(qoldiq)} so'm"
-        )
+    budget = _budget_lines(country, country_totals)
+    if budget:
+        text += "\n" + "\n".join(budget)
     return text
 
 
@@ -101,7 +299,7 @@ async def fetch_weather(city_name):
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             geo_url = "https://geocoding-api.open-meteo.com/v1/search"
-            async with session.get(geo_url, params={"name": city_name, "count": 1}) as resp:
+            async with session.get(geo_url, params={"name": city_name, "count": 1, "language": "en"}) as resp:
                 geo = await resp.json()
             results = geo.get("results")
             if not results:
@@ -120,8 +318,17 @@ async def fetch_weather(city_name):
                 "city": found_name, "temp": cw["temperature"],
                 "wind": cw["windspeed"], "code": cw["weathercode"],
             }
-    except (aiohttp.ClientError, TimeoutError):
+    except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError, ValueError, KeyError) as e:
+        log.warning("Ob-havo olishda xato: %r", e)
         return None
+
+
+async def _reply(target, text, edit, **kwargs):
+    """edit=True bo'lsa tugmali xabarni tahrirlaydi, aks holda yangi xabar yuboradi."""
+    if edit:
+        await target.edit_text(text, **kwargs)
+    else:
+        await target.answer(text, **kwargs)
 
 
 # ================= BASIC =================
@@ -132,7 +339,7 @@ async def cmd_start(message: Message):
         "👋 Salom! Men sizning shaxsiy sayohat botingizman.\n\n"
         "Davlat → Shahar → Joy tartibida saqlayman: har bir davlat ichida "
         "bir nechta shahar, har shaharda mehmonxona/restoran/ko'rish joylari, "
-        "kundalik, kontaktlar, fayllar va xarajatlar bo'lishi mumkin.\n\n"
+        "kundalik, kontaktlar, fayllar, xarajatlar va ob-havo yozuvlari bo'lishi mumkin.\n\n"
         "Boshlash uchun: /trip_add — yangi davlat qo'shing\n"
         "Barcha komandalar: /help"
     )
@@ -154,14 +361,15 @@ async def cmd_help(message: Message):
         "<b>Kontaktlar</b> (davlat/shahar so'raladi)\n"
         "/contact_add — kontakt qo'shish\n"
         "/contacts — kontaktlar ro'yxati\n\n"
-        "<b>Xarajatlar</b> (davlat/shahar so'raladi)\n"
+        "<b>Xarajatlar</b> (davlat/shahar so'raladi, valyutani tanlaysiz)\n"
         "/expense_add — xarajat qo'shish\n"
-        "/expenses — shahar + davlat bo'yicha hisobot\n\n"
+        "/expenses — hisobot va oxirgi xarajatlar\n\n"
         "<b>Fayllar</b> (davlat/shahar so'raladi)\n"
         "/file_add — chipta/hujjat saqlash\n"
         "/files — fayllarni ko'rish\n\n"
-        "<b>Ob-havo</b>\n"
-        "/weather — tanlangan shahar uchun joriy ob-havo\n\n"
+        "<b>Ob-havo</b> (davlat/shahar so'raladi)\n"
+        "/weather — hozirgi ob-havo + yozib qo'yilganlar\n"
+        "/weather_add — qaysi kuni qanday havo bo'lganini yozib qo'yish\n\n"
         "<b>Statistika</b>\n"
         "/stats — umumiy statistika\n\n"
         "❌ /cancel — joriy amalni bekor qilish"
@@ -179,15 +387,7 @@ async def cmd_cancel(message: Message, state: FSMContext):
 # davlat -> shahar tanlanadi (qo'shish buyruqlarida yangisini ham qo'shish mumkin),
 # so'ng tanlangan shaharga qarab tegishli amal bajariladi.
 
-ADD_PURPOSES = {"diary_add", "contact_add", "file_add", "expense_add"}
-
-
-async def _reply(target, text, edit, **kwargs):
-    """edit=True bo'lsa tugmali xabarni tahrirlaydi, aks holda yangi xabar yuboradi."""
-    if edit:
-        await target.edit_text(text, **kwargs)
-    else:
-        await target.answer(text, **kwargs)
+ADD_PURPOSES = {"diary_add", "contact_add", "file_add", "expense_add", "weather_add"}
 
 
 async def _start_pick(message: Message, state: FSMContext, purpose: str):
@@ -217,9 +417,9 @@ async def pick_country_select(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text("🌍 Yangi davlat nomini kiriting:")
         await callback.answer()
         return
-    country = db.get_country(int(val))
-    if not country or country["user_id"] != callback.from_user.id:
-        await callback.answer("Davlat topilmadi", show_alert=True)
+    country = own_country(callback.from_user.id, val)
+    if not country:
+        await callback.answer(NOT_FOUND, show_alert=True)
         return
     await callback.answer()
     await _pick_ask_city(callback.message, state, country["id"], edit=True)
@@ -230,7 +430,7 @@ async def pick_new_country_name(message: Message, state: FSMContext):
     name = message.text.strip()
     existing = db.find_country_by_name(message.from_user.id, name)
     if existing:
-        await message.answer(f"ℹ️ \"{existing['name']}\" allaqachon mavjud, unga bog'landi.")
+        await message.answer(f"ℹ️ \"{esc(existing['name'])}\" allaqachon mavjud, unga bog'landi.")
         await _pick_ask_city(message, state, existing["id"], edit=False)
         return
     await state.update_data(new_country_name=name)
@@ -241,6 +441,9 @@ async def pick_new_country_name(message: Message, state: FSMContext):
 @router.callback_query(Pick.new_country_status, F.data.startswith("status:"))
 async def pick_new_country_status(callback: CallbackQuery, state: FSMContext):
     status = callback.data.split(":")[1]
+    if status not in VALID_STATUSES:
+        await callback.answer()
+        return
     data = await state.get_data()
     country_id = db.add_country(callback.from_user.id, data["new_country_name"], status)
     await callback.answer()
@@ -275,9 +478,9 @@ async def pick_city_select(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     data = await state.get_data()
-    city = db.get_city(int(val))
-    if not city or city["country_id"] != data.get("country_id"):
-        await callback.answer("Shahar topilmadi", show_alert=True)
+    city = own_city(callback.from_user.id, val, data.get("country_id"))
+    if not city:
+        await callback.answer(NOT_FOUND, show_alert=True)
         return
     await callback.answer()
     await _pick_done(callback.message, state, callback.from_user.id, city["id"], edit=True)
@@ -303,7 +506,7 @@ async def _pick_done(target, state: FSMContext, user_id, city_id, edit):
     purpose = data["purpose"]
     city = db.get_city(city_id)
     country = db.get_country(city["country_id"])
-    where = escape(f"{country['name']} — {city['name']}")
+    where = esc(f"{country['name']} — {city['name']}")
 
     # --- qo'shish buyruqlari: tanlangan shahar ID'si FSM ichida saqlanadi ---
     if purpose == "diary_add":
@@ -324,6 +527,13 @@ async def _pick_done(target, state: FSMContext, user_id, city_id, edit):
         await state.update_data(city_id=city_id)
         await state.set_state(ExpenseAdd.category)
         await _reply(target, f"💰 {where}\nKategoriyani tanlang:", edit, reply_markup=kb.category_kb())
+    elif purpose == "weather_add":
+        await state.update_data(city_id=city_id)
+        await state.set_state(WeatherAdd.date)
+        await _reply(
+            target, f"🌤 {where}\nQaysi kunning ob-havosini yozmoqchisiz?", edit,
+            reply_markup=kb.weather_date_kb(),
+        )
 
     # --- ko'rish buyruqlari: natijani chiqarib, holatni tozalaymiz ---
     else:
@@ -344,6 +554,7 @@ async def _pick_done(target, state: FSMContext, user_id, city_id, edit):
 
 @router.message(Command("trip_add"))
 async def trip_add_start(message: Message, state: FSMContext):
+    await state.clear()
     countries = db.get_countries(message.from_user.id)
     if countries:
         await state.set_state(TripAdd.select_country)
@@ -363,19 +574,22 @@ async def trip_add_select_country(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text("🌍 Yangi davlat nomini kiriting:")
         await callback.answer()
         return
-    country_id = int(val)
-    await state.update_data(country_id=country_id)
-    await _trip_ask_city(callback.message.edit_text, state, country_id)
+    country = own_country(callback.from_user.id, val)
+    if not country:
+        await callback.answer(NOT_FOUND, show_alert=True)
+        return
+    await state.update_data(country_id=country["id"])
+    await _trip_ask_city(callback.message.edit_text, state, country["id"])
     await callback.answer()
 
 
-@router.message(TripAdd.new_country_name)
+@router.message(TripAdd.new_country_name, F.text, ~F.text.startswith("/"))
 async def trip_add_new_country_name(message: Message, state: FSMContext):
     name = message.text.strip()
     existing = db.find_country_by_name(message.from_user.id, name)
     if existing:
         await state.update_data(country_id=existing["id"])
-        await message.answer(f"ℹ️ \"{existing['name']}\" allaqachon mavjud, unga bog'landi.")
+        await message.answer(f"ℹ️ \"{esc(existing['name'])}\" allaqachon mavjud, unga bog'landi.")
         await _trip_ask_city(message.answer, state, existing["id"])
         return
     await state.update_data(new_country_name=name)
@@ -386,10 +600,13 @@ async def trip_add_new_country_name(message: Message, state: FSMContext):
 @router.callback_query(TripAdd.status, F.data.startswith("status:"))
 async def trip_add_status(callback: CallbackQuery, state: FSMContext):
     status = callback.data.split(":")[1]
+    if status not in VALID_STATUSES:
+        await callback.answer()
+        return
     await state.update_data(status=status)
     await state.set_state(TripAdd.budget)
     await callback.message.edit_text(
-        "💰 Rejalashtirilgan byudjet? (masalan: 3000000, yoki \"3 mln\", \"500 ming\")",
+        "💰 Rejalashtirilgan byudjet? (masalan: 3000000, yoki \"3 mln\", \"500 ming\", \"1500\")",
         reply_markup=kb.skip_kb("skip_budget"),
     )
     await callback.answer()
@@ -398,32 +615,66 @@ async def trip_add_status(callback: CallbackQuery, state: FSMContext):
 @router.message(TripAdd.budget)
 async def trip_add_budget(message: Message, state: FSMContext):
     budget = parse_money(message.text)
-    if budget is None:
+    if budget is None or budget <= 0:
         await message.answer("Tushunmadim. Masalan: 3000000, \"3 mln\", \"500 ming\" — yoki tugmani bosing.")
         return
     await state.update_data(budget=budget)
-    await state.set_state(TripAdd.budget_period)
-    await message.answer("Bu byudjet qanday?", reply_markup=kb.budget_period_kb())
+    await state.set_state(TripAdd.budget_currency)
+    await message.answer("💱 Byudjet qaysi valyutada?", reply_markup=kb.currency_kb())
 
 
 @router.callback_query(TripAdd.budget, F.data == "skip_budget")
 async def trip_add_budget_skip(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(budget=None, budget_period=None)
+    await state.update_data(budget=None, budget_period=None, budget_currency="UZS")
     await state.set_state(TripAdd.notes)
     await callback.message.edit_text("Izoh qoldirmoqchimisiz?", reply_markup=kb.skip_kb("skip_trip_notes"))
     await callback.answer()
 
 
+async def _trip_ask_period(answer_func, state: FSMContext):
+    await state.set_state(TripAdd.budget_period)
+    await answer_func("Bu byudjet qanday?", reply_markup=kb.budget_period_kb())
+
+
+@router.callback_query(TripAdd.budget_currency, F.data.startswith("cur:"))
+async def trip_add_budget_currency(callback: CallbackQuery, state: FSMContext):
+    val = callback.data.split(":", 1)[1]
+    if val == "other":
+        await state.set_state(TripAdd.budget_currency_other)
+        await callback.message.edit_text("✏️ Valyuta nomini yozing (masalan: EUR, TRY, AED, RUB):")
+        await callback.answer()
+        return
+    if val not in CURRENCY_SYMBOLS:
+        await callback.answer()
+        return
+    await state.update_data(budget_currency=val)
+    await _trip_ask_period(callback.message.edit_text, state)
+    await callback.answer()
+
+
+@router.message(TripAdd.budget_currency_other, F.text, ~F.text.startswith("/"))
+async def trip_add_budget_currency_other(message: Message, state: FSMContext):
+    code = normalize_currency(message.text)
+    if not code:
+        await message.answer("Tushunmadim. 2–5 ta harfli kod yozing, masalan: EUR, TRY, AED, RUB.")
+        return
+    await state.update_data(budget_currency=code)
+    await _trip_ask_period(message.answer, state)
+
+
 @router.callback_query(TripAdd.budget_period, F.data.startswith("bperiod:"))
 async def trip_add_budget_period(callback: CallbackQuery, state: FSMContext):
     period = callback.data.split(":")[1]
+    if period not in BUDGET_PERIOD_LABELS:
+        await callback.answer()
+        return
     await state.update_data(budget_period=period)
     await state.set_state(TripAdd.notes)
     await callback.message.edit_text("Izoh qoldirmoqchimisiz?", reply_markup=kb.skip_kb("skip_trip_notes"))
     await callback.answer()
 
 
-@router.message(TripAdd.notes)
+@router.message(TripAdd.notes, F.text)
 async def trip_add_notes(message: Message, state: FSMContext):
     await _trip_add_finish(message.from_user.id, state, message.text.strip(), message.answer)
 
@@ -439,6 +690,7 @@ async def _trip_add_finish(user_id, state, notes, answer_func):
     country_id = db.add_country(
         user_id, data["new_country_name"], data["status"],
         data.get("budget"), data.get("budget_period"), notes,
+        budget_currency=data.get("budget_currency") or "UZS",
     )
     await state.update_data(country_id=country_id)
     await _trip_ask_city(answer_func, state, country_id)
@@ -464,15 +716,17 @@ async def trip_add_select_city(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text("🏙 Yangi shahar nomini kiriting:")
         await callback.answer()
         return
-    city_id = int(val)
+    city = own_city(callback.from_user.id, val, country_id)
+    if not city:
+        await callback.answer(NOT_FOUND, show_alert=True)
+        return
     country = db.get_country(country_id)
-    city = db.get_city(city_id)
     await state.clear()
     await callback.message.edit_text(build_city_profile(country, city))
     await callback.answer()
 
 
-@router.message(TripAdd.new_city_name)
+@router.message(TripAdd.new_city_name, F.text, ~F.text.startswith("/"))
 async def trip_add_new_city_name(message: Message, state: FSMContext):
     data = await state.get_data()
     country_id = data["country_id"]
@@ -503,101 +757,79 @@ async def cmd_trips(message: Message):
     )
 
 
-@router.callback_query(F.data.startswith("trips_country:"))
-async def cb_trips_country(callback: CallbackQuery):
-    country_id = int(callback.data.split(":")[1])
-    cities = db.get_cities(country_id)
-    await callback.message.edit_text(
-        "🏙 Shaharni tanlang:", reply_markup=kb.city_select_kb(cities, prefix=f"trips_city:{country_id}")
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("trips_city:"))
-async def cb_trips_city(callback: CallbackQuery, state: FSMContext):
-    _, country_id_s, val = callback.data.split(":")
-    country_id = int(country_id_s)
-    if val == "new":
-        await state.update_data(new_city_country_id=country_id)
-        await state.set_state(TripsNewCity.name)
-        await callback.message.edit_text("🏙 Yangi shahar nomini kiriting:")
-        await callback.answer()
-        return
-    city_id = int(val)
-    country = db.get_country(country_id)
-    city = db.get_city(city_id)
-    await callback.message.edit_text(build_city_profile(country, city))
-    await callback.answer()
-
-
-@router.message(TripsNewCity.name)
-async def trips_new_city_name(message: Message, state: FSMContext):
-    data = await state.get_data()
-    country_id = data["new_city_country_id"]
-    city_id = db.add_city(country_id, message.text.strip())
-    await state.clear()
-    country = db.get_country(country_id)
-    city = db.get_city(city_id)
-    await message.answer(build_city_profile(country, city))
-
-
 @router.message(Command("trip"))
 async def cmd_trip(message: Message):
     # Eski /trip endi /trips bilan bir xil ishlaydi
     await cmd_trips(message)
 
 
-# ================= DIARY =================
-
-@router.message(Command("diary_add"))
-async def diary_add_start(message: Message, state: FSMContext):
-    await _start_pick(message, state, "diary_add")
-
-
-@router.message(DiaryAdd.text, F.photo)
-async def diary_add_photo(message: Message, state: FSMContext):
-    data = await state.get_data()
-    db.add_diary(data["city_id"], str(date.today()), message.caption or "", message.photo[-1].file_id)
-    await state.clear()
-    await message.answer("✅ Kundalikka rasm bilan saqlandi")
-
-
-@router.message(DiaryAdd.text)
-async def diary_add_text(message: Message, state: FSMContext):
-    data = await state.get_data()
-    db.add_diary(data["city_id"], str(date.today()), message.text, None)
-    await state.clear()
-    await message.answer("✅ Kundalikka saqlandi")
-
-
-@router.message(Command("diary"))
-async def cmd_diary(message: Message, state: FSMContext):
-    await _start_pick(message, state, "diary")
-
-
-async def _show_diary(target, city_id, where, edit):
-    entries = db.get_diary(city_id)
-    if not entries:
-        await _reply(target, f"📔 {where}\nBu shahar uchun hali kundalik yozuvlari yo'q.", edit)
+@router.callback_query(F.data.startswith("trips_country:"))
+async def cb_trips_country(callback: CallbackQuery):
+    country = own_country(callback.from_user.id, callback.data.split(":")[1])
+    if not country:
+        await callback.answer(NOT_FOUND, show_alert=True)
         return
-    await _reply(target, f"📔 {where} — kundalik", edit)
-    for e in entries[:10]:
-        caption = f"📅 {e['entry_date']}\n{e['text'] or ''}"
-        if e["photo_file_id"]:
-            await target.answer_photo(e["photo_file_id"], caption=caption)
-        else:
-            await target.answer(caption)
+    cities = db.get_cities(country["id"])
+    await callback.message.edit_text(
+        "🏙 Shaharni tanlang:", reply_markup=kb.city_select_kb(cities, prefix=f"trips_city:{country['id']}")
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("trips_city:"))
+async def cb_trips_city(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    _, country_id_s, val = parts
+    country = own_country(callback.from_user.id, country_id_s)
+    if not country:
+        await callback.answer(NOT_FOUND, show_alert=True)
+        return
+    if val == "new":
+        await state.clear()
+        await state.update_data(new_city_country_id=country["id"])
+        await state.set_state(TripsNewCity.name)
+        await callback.message.edit_text("🏙 Yangi shahar nomini kiriting:")
+        await callback.answer()
+        return
+    city = own_city(callback.from_user.id, val, country["id"])
+    if not city:
+        await callback.answer(NOT_FOUND, show_alert=True)
+        return
+    await callback.message.edit_text(build_city_profile(country, city))
+    await callback.answer()
+
+
+@router.message(TripsNewCity.name, F.text, ~F.text.startswith("/"))
+async def trips_new_city_name(message: Message, state: FSMContext):
+    data = await state.get_data()
+    country_id = data["new_city_country_id"]
+    name = message.text.strip()
+    existing = db.find_city_by_name(country_id, name)
+    prefix_msg = ""
+    if existing:
+        city_id = existing["id"]
+        prefix_msg = "ℹ️ Bu shahar allaqachon mavjud.\n\n"
+    else:
+        city_id = db.add_city(country_id, name)
+    await state.clear()
+    country = db.get_country(country_id)
+    city = db.get_city(city_id)
+    await message.answer(prefix_msg + build_city_profile(country, city))
 
 
 # ================= PLACE_ADD (davlat/shahar tanlash bilan) =================
 
 @router.message(Command("place_add"))
 async def place_add_start(message: Message, state: FSMContext):
+    await state.clear()
     await state.set_state(PlaceAdd.name)
     await message.answer("📍 Joy nomini kiriting:")
 
 
-@router.message(PlaceAdd.name)
+@router.message(PlaceAdd.name, F.text)
 async def place_add_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
     countries = db.get_countries(message.from_user.id)
@@ -617,19 +849,22 @@ async def place_add_country_select(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text("🌍 Yangi davlat nomini kiriting:")
         await callback.answer()
         return
-    country_id = int(val)
-    await state.update_data(country_id=country_id)
-    await _place_add_ask_city(callback.message.edit_text, state, country_id)
+    country = own_country(callback.from_user.id, val)
+    if not country:
+        await callback.answer(NOT_FOUND, show_alert=True)
+        return
+    await state.update_data(country_id=country["id"])
+    await _place_add_ask_city(callback.message.edit_text, state, country["id"])
     await callback.answer()
 
 
-@router.message(PlaceAdd.new_country_name)
+@router.message(PlaceAdd.new_country_name, F.text, ~F.text.startswith("/"))
 async def place_add_new_country_name(message: Message, state: FSMContext):
     name = message.text.strip()
     existing = db.find_country_by_name(message.from_user.id, name)
     if existing:
         await state.update_data(country_id=existing["id"])
-        await message.answer(f"ℹ️ \"{existing['name']}\" allaqachon mavjud, unga bog'landi.")
+        await message.answer(f"ℹ️ \"{esc(existing['name'])}\" allaqachon mavjud, unga bog'landi.")
         await _place_add_ask_city(message.answer, state, existing["id"])
         return
     await state.update_data(new_country_name=name)
@@ -640,6 +875,9 @@ async def place_add_new_country_name(message: Message, state: FSMContext):
 @router.callback_query(PlaceAdd.new_country_status, F.data.startswith("status:"))
 async def place_add_new_country_status(callback: CallbackQuery, state: FSMContext):
     status = callback.data.split(":")[1]
+    if status not in VALID_STATUSES:
+        await callback.answer()
+        return
     data = await state.get_data()
     country_id = db.add_country(callback.from_user.id, data["new_country_name"], status)
     await state.update_data(country_id=country_id)
@@ -665,12 +903,16 @@ async def place_add_city_select(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text("🏙 Yangi shahar nomini kiriting:")
         await callback.answer()
         return
-    city_id = int(val)
-    await _place_after_city(city_id, state, callback.message.edit_text)
+    data = await state.get_data()
+    city = own_city(callback.from_user.id, val, data.get("country_id"))
+    if not city:
+        await callback.answer(NOT_FOUND, show_alert=True)
+        return
+    await _place_after_city(city["id"], state, callback.message.edit_text)
     await callback.answer()
 
 
-@router.message(PlaceAdd.new_city_name)
+@router.message(PlaceAdd.new_city_name, F.text, ~F.text.startswith("/"))
 async def place_add_new_city_name(message: Message, state: FSMContext):
     data = await state.get_data()
     country_id = data["country_id"]
@@ -699,6 +941,9 @@ async def _place_after_city(city_id, state: FSMContext, answer_func):
 @router.callback_query(PlaceAdd.type, F.data.startswith("ptype:"))
 async def place_add_type(callback: CallbackQuery, state: FSMContext):
     ptype = callback.data.split(":")[1]
+    if ptype not in TYPE_NAMES:
+        await callback.answer()
+        return
     await state.update_data(type=ptype)
     if ptype == "restaurant":
         await state.set_state(PlaceAdd.halal)
@@ -714,13 +959,16 @@ async def place_add_type(callback: CallbackQuery, state: FSMContext):
 async def place_add_halal(callback: CallbackQuery, state: FSMContext):
     val = callback.data.split(":")[1]
     mapping = {"yes": True, "no": False, "unknown": None}
+    if val not in mapping:
+        await callback.answer()
+        return
     await state.update_data(is_halal=mapping[val])
     await state.set_state(PlaceAdd.price)
     await callback.message.edit_text("💰 Narxi:", reply_markup=kb.skip_kb("skip_price"))
     await callback.answer()
 
 
-@router.message(PlaceAdd.price)
+@router.message(PlaceAdd.price, F.text)
 async def place_add_price(message: Message, state: FSMContext):
     await state.update_data(price=message.text.strip())
     await state.set_state(PlaceAdd.rating)
@@ -738,7 +986,13 @@ async def place_add_price_skip(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(PlaceAdd.rating, F.data.startswith("rating:"))
 async def place_add_rating(callback: CallbackQuery, state: FSMContext):
     val = callback.data.split(":")[1]
-    rating = None if val == "skip" else int(val)
+    if val == "skip":
+        rating = None
+    elif val in ("1", "2", "3", "4", "5"):
+        rating = int(val)
+    else:
+        await callback.answer()
+        return
     await state.update_data(rating=rating)
     await state.set_state(PlaceAdd.location)
     await callback.message.edit_text(
@@ -804,7 +1058,7 @@ async def place_add_photos_done(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.message(PlaceAdd.notes)
+@router.message(PlaceAdd.notes, F.text)
 async def place_add_notes(message: Message, state: FSMContext):
     await _finish_place_add(state, message.text.strip(), message.answer)
 
@@ -826,26 +1080,26 @@ async def _finish_place_add(state, notes, answer_func):
         db.add_place_photo(place_id, photo_id)
     await state.clear()
     photo_note = f", {len(data.get('photos', []))} ta rasm" if data.get("photos") else ""
-    await answer_func(f"✅ Saqlandi: {data['name']} ({TYPE_NAMES.get(data['type'], data['type'])}{photo_note})")
+    await answer_func(f"✅ Saqlandi: {esc(data['name'])} ({TYPE_NAMES.get(data['type'], data['type'])}{photo_note})")
 
 
-# ================= PLACES (faol shahar) =================
+# ================= PLACES (davlat -> shahar -> tur) =================
 
 def _place_line(p):
     emoji = {"hotel": "🏨", "restaurant": "🍽", "attraction": "🏛"}.get(p["type"], "📍")
-    line = f"{emoji} <b>{p['name']}</b>"
+    line = f"{emoji} <b>{esc(p['name'])}</b>"
     if p["type"] == "restaurant" and p["is_halal"] is not None:
         line += " ✅halol" if p["is_halal"] else " ❌nohalol"
     if p["price"]:
-        line += f" — {p['price']}"
+        line += f" — {esc(p['price'])}"
     if p["rating"]:
         line += " " + "⭐" * p["rating"]
     if p["address"]:
-        line += f"\n📌 {p['address']}"
+        line += f"\n📌 {esc(p['address'])}"
     if p["latitude"] and p["longitude"]:
         line += f"\n🗺 https://maps.google.com/?q={p['latitude']},{p['longitude']}"
     if p["notes"]:
-        line += f"\n📝 {p['notes']}"
+        line += f"\n📝 {esc(p['notes'])}"
     return line
 
 
@@ -875,38 +1129,59 @@ async def cmd_places(message: Message):
 
 @router.callback_query(F.data.startswith("places_country:"))
 async def cb_places_country(callback: CallbackQuery):
-    country_id = int(callback.data.split(":")[1])
-    cities = db.get_cities(country_id)
+    country = own_country(callback.from_user.id, callback.data.split(":")[1])
+    if not country:
+        await callback.answer(NOT_FOUND, show_alert=True)
+        return
+    cities = db.get_cities(country["id"])
     if not cities:
         await callback.message.edit_text("Bu davlatda hali shahar yo'q.")
         await callback.answer()
         return
     await callback.message.edit_text(
-        "🏙 Qaysi shahar?", reply_markup=kb.city_select_kb(cities, prefix=f"places_city:{country_id}", show_add=False)
+        "🏙 Qaysi shahar?", reply_markup=kb.city_select_kb(cities, prefix=f"places_city:{country['id']}", show_add=False)
     )
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("places_city:"))
 async def cb_places_city(callback: CallbackQuery):
-    _, _country_id_s, city_id_s = callback.data.split(":")
-    city_id = int(city_id_s)
-    places = db.get_places(city_id)
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    country = own_country(callback.from_user.id, parts[1])
+    city = own_city(callback.from_user.id, parts[2], country["id"] if country else None)
+    if not country or not city:
+        await callback.answer(NOT_FOUND, show_alert=True)
+        return
+    places = db.get_places(city["id"])
     if not places:
         await callback.message.edit_text("Bu shaharda hali joylar yo'q.")
         await callback.answer()
         return
-    city = db.get_city(city_id)
-    await callback.message.edit_text(f"🏙 {city['name']} — qaysi turi?", reply_markup=kb.type_filter_kb(city_id))
+    await callback.message.edit_text(
+        f"🏙 {esc(city['name'])} — qaysi turi?", reply_markup=kb.type_filter_kb(city["id"])
+    )
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("places_show:"))
 async def cb_places_show(callback: CallbackQuery):
-    _, city_id_s, ptype = callback.data.split(":")
-    city_id = int(city_id_s)
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    city = own_city(callback.from_user.id, parts[1])
+    ptype = parts[2]
+    if not city:
+        await callback.answer(NOT_FOUND, show_alert=True)
+        return
+    if ptype != "all" and ptype not in TYPE_NAMES:
+        await callback.answer()
+        return
     type_filter = None if ptype == "all" else ptype
-    places = db.get_places(city_id, ptype=type_filter)
+    places = db.get_places(city["id"], ptype=type_filter)
     await callback.answer()
     if not places:
         await callback.message.edit_text("Bu filtr bo'yicha joylar topilmadi.")
@@ -916,6 +1191,67 @@ async def cb_places_show(callback: CallbackQuery):
         await _send_place(callback.message, p)
 
 
+# ================= DIARY =================
+
+@router.message(Command("diary_add"))
+async def diary_add_start(message: Message, state: FSMContext):
+    await _start_pick(message, state, "diary_add")
+
+
+@router.message(DiaryAdd.text, F.photo)
+async def diary_add_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    db.add_diary(data["city_id"], str(today()), message.caption or "", message.photo[-1].file_id)
+    await state.clear()
+    await message.answer("✅ Kundalikka rasm bilan saqlandi")
+
+
+@router.message(DiaryAdd.text, F.text)
+async def diary_add_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    db.add_diary(data["city_id"], str(today()), message.text, None)
+    await state.clear()
+    await message.answer("✅ Kundalikka saqlandi")
+
+
+@router.message(Command("diary"))
+async def cmd_diary(message: Message, state: FSMContext):
+    await _start_pick(message, state, "diary")
+
+
+def _diary_text(raw):
+    raw = raw or ""
+    # Eski versiyada "Kundalikka saqlash" ob-havoni <b> belgilari bilan saqlagan; faqat shularni tozalaymiz
+    if raw.startswith("🌤 <b>"):
+        raw = raw.replace("<b>", "").replace("</b>", "")
+    return esc(raw)
+
+
+async def _show_diary(target, city_id, where, edit):
+    entries = db.get_diary(city_id)
+    if not entries:
+        await _reply(target, f"📔 {where}\nBu shahar uchun hali kundalik yozuvlari yo'q.", edit)
+        return
+    shown = entries[:10]
+    header = f"📔 <b>{where}</b>\n📚 Jami yozuvlar: {len(entries)}"
+    if len(entries) > len(shown):
+        header += f" (oxirgi {len(shown)} tasi ko'rsatildi)"
+    await _reply(target, header, edit)
+    for e in shown:
+        body = _diary_text(e["text"])
+        card = f"📅 <b>{fmt_date(e['entry_date'])}</b>"
+        if body.strip():
+            card += f"\n{SEP}\n{body}"
+        if e["photo_file_id"]:
+            if len(card) <= 1000:
+                await target.answer_photo(e["photo_file_id"], caption=card)
+            else:  # rasm izohi 1024 belgidan oshmasligi kerak
+                await target.answer_photo(e["photo_file_id"], caption=f"📅 <b>{fmt_date(e['entry_date'])}</b>")
+                await target.answer(card)
+        else:
+            await target.answer(card)
+
+
 # ================= CONTACTS =================
 
 @router.message(Command("contact_add"))
@@ -923,14 +1259,14 @@ async def contact_add_start(message: Message, state: FSMContext):
     await _start_pick(message, state, "contact_add")
 
 
-@router.message(ContactAdd.name)
+@router.message(ContactAdd.name, F.text)
 async def contact_add_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
     await state.set_state(ContactAdd.contact_info)
     await message.answer("📞 Telefon/Telegram/Instagram:", reply_markup=kb.skip_kb("skip_contact_info"))
 
 
-@router.message(ContactAdd.contact_info)
+@router.message(ContactAdd.contact_info, F.text)
 async def contact_add_info(message: Message, state: FSMContext):
     await state.update_data(contact_info=message.text.strip())
     await state.set_state(ContactAdd.notes)
@@ -945,22 +1281,22 @@ async def contact_add_info_skip(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.message(ContactAdd.notes)
+@router.message(ContactAdd.notes, F.text)
 async def contact_add_notes(message: Message, state: FSMContext):
-    await _finish_contact_add(message.from_user.id, state, message.text.strip(), message.answer)
+    await _finish_contact_add(state, message.text.strip(), message.answer)
 
 
 @router.callback_query(ContactAdd.notes, F.data == "skip_contact_notes")
 async def contact_add_notes_skip(callback: CallbackQuery, state: FSMContext):
-    await _finish_contact_add(callback.from_user.id, state, None, callback.message.edit_text)
+    await _finish_contact_add(state, None, callback.message.edit_text)
     await callback.answer()
 
 
-async def _finish_contact_add(user_id, state, notes, answer_func):
+async def _finish_contact_add(state, notes, answer_func):
     data = await state.get_data()
     db.add_contact(data["city_id"], data["name"], data.get("contact_info"), notes)
     await state.clear()
-    await answer_func(f"✅ Kontakt saqlandi: {data['name']}")
+    await answer_func(f"✅ Kontakt saqlandi: {esc(data['name'])}")
 
 
 @router.message(Command("contacts"))
@@ -975,13 +1311,13 @@ async def _show_contacts(target, city_id, where, edit):
         return
     lines = []
     for c in contacts:
-        line = f"👤 <b>{c['name']}</b>"
+        line = f"👤 <b>{esc(c['name'])}</b>"
         if c["contact_info"]:
-            line += f" — {c['contact_info']}"
+            line += f" — {esc(c['contact_info'])}"
         if c["notes"]:
-            line += f"\n📝 {c['notes']}"
+            line += f"\n📝 {esc(c['notes'])}"
         lines.append(line)
-    await _reply(target, f"👤 {where}\n\n" + "\n\n".join(lines), edit)
+    await _reply(target, f"👤 <b>{where}</b>\n{SEP}\n" + "\n\n".join(lines), edit)
 
 
 # ================= EXPENSES =================
@@ -994,58 +1330,104 @@ async def expense_add_start(message: Message, state: FSMContext):
 @router.callback_query(ExpenseAdd.category, F.data.startswith("cat:"))
 async def expense_add_category(callback: CallbackQuery, state: FSMContext):
     category = callback.data.split(":", 1)[1]
+    if category not in kb.EXPENSE_CATEGORIES:
+        await callback.answer()
+        return
     await state.update_data(category=category)
     await state.set_state(ExpenseAdd.amount)
-    await callback.message.edit_text("Summani kiriting (masalan: 35000):")
+    await callback.message.edit_text(
+        f"{esc(category)}\nSummani kiriting (masalan: 35000, \"35 ming\", \"1.5 mln\", \"12,50\"):"
+    )
     await callback.answer()
 
 
 @router.message(ExpenseAdd.amount)
 async def expense_add_amount(message: Message, state: FSMContext):
     amount = parse_money(message.text)
-    if amount is None:
-        await message.answer("Tushunmadim. Masalan: 35000, \"35 ming\" — qaytadan kiriting.")
+    if amount is None or amount <= 0:
+        await message.answer("Tushunmadim. Masalan: 35000, \"35 ming\", \"12,50\" — qaytadan kiriting.")
         return
     await state.update_data(amount=amount)
+    await state.set_state(ExpenseAdd.currency)
+    await message.answer(f"💱 {fmt_money(amount)} — qaysi valyutada?", reply_markup=kb.currency_kb())
+
+
+async def _expense_after_currency(answer_func, state: FSMContext):
     data = await state.get_data()
     places = db.get_places(data["city_id"])
     if places:
         await state.set_state(ExpenseAdd.place)
-        await message.answer("Qaysi joy bilan bog'liq?", reply_markup=kb.places_link_kb(places))
+        await answer_func("Qaysi joy bilan bog'liq?", reply_markup=kb.places_link_kb(places))
     else:
         await state.update_data(place_id=None)
         await state.set_state(ExpenseAdd.note)
-        await message.answer("📝 Izoh:", reply_markup=kb.skip_kb("skip_expense_note"))
+        await answer_func("📝 Izoh:", reply_markup=kb.skip_kb("skip_expense_note"))
+
+
+@router.callback_query(ExpenseAdd.currency, F.data.startswith("cur:"))
+async def expense_add_currency(callback: CallbackQuery, state: FSMContext):
+    val = callback.data.split(":", 1)[1]
+    if val == "other":
+        await state.set_state(ExpenseAdd.currency_other)
+        await callback.message.edit_text("✏️ Valyuta nomini yozing (masalan: EUR, TRY, AED, RUB):")
+        await callback.answer()
+        return
+    if val not in CURRENCY_SYMBOLS:
+        await callback.answer()
+        return
+    await state.update_data(currency=val)
+    await _expense_after_currency(callback.message.edit_text, state)
+    await callback.answer()
+
+
+@router.message(ExpenseAdd.currency_other, F.text, ~F.text.startswith("/"))
+async def expense_add_currency_other(message: Message, state: FSMContext):
+    code = normalize_currency(message.text)
+    if not code:
+        await message.answer("Tushunmadim. 2–5 ta harfli kod yozing, masalan: EUR, TRY, AED, RUB.")
+        return
+    await state.update_data(currency=code)
+    await _expense_after_currency(message.answer, state)
 
 
 @router.callback_query(ExpenseAdd.place, F.data.startswith("link_place:"))
 async def expense_add_place(callback: CallbackQuery, state: FSMContext):
     val = callback.data.split(":")[1]
-    place_id = None if val == "none" else int(val)
+    if val == "none":
+        place_id = None
+    else:
+        data = await state.get_data()
+        place = own_place(callback.from_user.id, val, data.get("city_id"))
+        if not place:
+            await callback.answer(NOT_FOUND, show_alert=True)
+            return
+        place_id = place["id"]
     await state.update_data(place_id=place_id)
     await state.set_state(ExpenseAdd.note)
     await callback.message.edit_text("📝 Izoh:", reply_markup=kb.skip_kb("skip_expense_note"))
     await callback.answer()
 
 
-@router.message(ExpenseAdd.note)
+@router.message(ExpenseAdd.note, F.text)
 async def expense_add_note(message: Message, state: FSMContext):
-    await _finish_expense_add(message.from_user.id, state, message.text.strip(), message.answer)
+    await _finish_expense_add(state, message.text.strip(), message.answer)
 
 
 @router.callback_query(ExpenseAdd.note, F.data == "skip_expense_note")
 async def expense_add_note_skip(callback: CallbackQuery, state: FSMContext):
-    await _finish_expense_add(callback.from_user.id, state, None, callback.message.edit_text)
+    await _finish_expense_add(state, None, callback.message.edit_text)
     await callback.answer()
 
 
-async def _finish_expense_add(user_id, state, note, answer_func):
+async def _finish_expense_add(state, note, answer_func):
     data = await state.get_data()
+    currency = data.get("currency") or "UZS"
     db.add_expense(
-        data["city_id"], data["category"], data["amount"], "so'm", str(date.today()), data.get("place_id"), note
+        data["city_id"], data["category"], data["amount"], currency,
+        str(today()), data.get("place_id"), note,
     )
     await state.clear()
-    await answer_func(f"✅ Xarajat qo'shildi: {data['category']} — {fmt_money(data['amount'])} so'm")
+    await answer_func(f"✅ Xarajat qo'shildi: {esc(data['category'])} — {fmt_amount(data['amount'], currency)}")
 
 
 @router.message(Command("expenses"))
@@ -1055,26 +1437,42 @@ async def cmd_expenses(message: Message, state: FSMContext):
 
 def _expenses_text(city, country):
     summary = db.get_expense_summary(city["id"])
-    country_total = db.get_country_expense_total(country["id"])
-    if not summary and country_total == 0:
+    country_totals = db.get_country_expense_totals(country["id"])
+    if not summary and not country_totals:
         return "Bu davlat uchun hali xarajat qo'shilmagan."
-    lines = [f"💰 <b>{city['name']}</b>", "━━━━━━━━━━━━━━━"]
-    city_total = 0
+    city_totals = db.get_city_expense_totals(city["id"])
+
+    lines = [f"💰 <b>{esc(city['name'])}</b> — xarajatlar", SEP]
     if summary:
-        for row in summary:
-            city_total += row["total"]
-            lines.append(f"{row['category']}: {fmt_money(row['total'])} {row['currency']}")
+        for row in sort_by_currency(summary):
+            lines.append(f"{esc(row['category'])}: {fmt_amount(row['total'], row['currency'])}")
     else:
         lines.append("Bu shaharda hali xarajat yo'q.")
-    lines.append("━━━━━━━━━━━━━━━")
-    lines.append(f"💵 Shu shahar: {fmt_money(city_total)} so'm")
-    lines.append(f"🌍 {country['name']} bo'yicha jami: {fmt_money(country_total)} so'm")
-    if country["budget"]:
-        period = BUDGET_PERIOD_LABELS.get(country.get("budget_period") or "total", "umumiy")
-        qoldiq = float(country["budget"]) - country_total
-        holat = "✅" if qoldiq >= 0 else "⚠️"
-        lines.append(f"🎯 Byudjet: {fmt_money(country['budget'])} so'm ({period})")
-        lines.append(f"{holat} Qoldiq: {fmt_money(qoldiq)} so'm")
+    lines += [
+        SEP,
+        f"💵 Shu shahar: {fmt_totals(city_totals)}",
+        f"🌍 {esc(country['name'])} bo'yicha jami: {fmt_totals(country_totals)}",
+    ]
+    lines += _budget_lines(country, country_totals)
+
+    recent = db.get_expenses(city["id"], limit=11)
+    if recent:
+        lines += [SEP, "📋 <b>Oxirgi xarajatlar</b>"]
+        for e in recent[:10]:
+            line = (
+                f"• {short_date(e['expense_date'])} · {esc(e['category'])} — "
+                f"<b>{fmt_amount(e['amount'], e['currency'])}</b>"
+            )
+            extra = []
+            if e["place_name"]:
+                extra.append(f"📍 {esc(e['place_name'])}")
+            if e["note"]:
+                extra.append(f"📝 {esc(cut(e['note'], 120))}")
+            if extra:
+                line += "\n   " + " · ".join(extra)
+            lines.append(line)
+        if len(recent) > 10:
+            lines.append("… (faqat oxirgi 10 ta xarajat ko'rsatildi)")
     return "\n".join(lines)
 
 
@@ -1101,18 +1499,18 @@ async def file_add_photo(message: Message, state: FSMContext):
     await message.answer("📝 Izoh:", reply_markup=kb.skip_kb("skip_file_notes"))
 
 
-@router.message(FileAdd.notes)
+@router.message(FileAdd.notes, F.text)
 async def file_add_notes(message: Message, state: FSMContext):
-    await _finish_file_add(message.from_user.id, state, message.text.strip(), message.answer)
+    await _finish_file_add(state, message.text.strip(), message.answer)
 
 
 @router.callback_query(FileAdd.notes, F.data == "skip_file_notes")
 async def file_add_notes_skip(callback: CallbackQuery, state: FSMContext):
-    await _finish_file_add(callback.from_user.id, state, None, callback.message.edit_text)
+    await _finish_file_add(state, None, callback.message.edit_text)
     await callback.answer()
 
 
-async def _finish_file_add(user_id, state, notes, answer_func):
+async def _finish_file_add(state, notes, answer_func):
     data = await state.get_data()
     db.add_file(data["city_id"], data["file_id"], data["file_type"], data.get("file_name"), notes)
     await state.clear()
@@ -1129,11 +1527,11 @@ async def _show_files(target, city_id, where, edit):
     if not files:
         await _reply(target, f"📎 {where}\nBu shahar uchun hali fayllar yo'q.", edit)
         return
-    await _reply(target, f"📎 {where} — fayllar", edit)
+    await _reply(target, f"📎 <b>{where}</b>\n📚 Jami fayllar: {len(files)}", edit)
     for f in files:
-        caption = f["file_name"] or "Fayl"
+        caption = esc(f["file_name"]) or "Fayl"
         if f["notes"]:
-            caption += f"\n📝 {f['notes']}"
+            caption += f"\n📝 {esc(f['notes'])}"
         if f["file_type"] == "photo":
             await target.answer_photo(f["file_id"], caption=caption)
         else:
@@ -1147,28 +1545,162 @@ async def cmd_weather(message: Message, state: FSMContext):
     await _start_pick(message, state, "weather")
 
 
+def _weather_record_lines(records):
+    lines = [SEP]
+    if not records:
+        lines.append("📋 Yozib qo'yilgan ob-havo yo'q. Qo'shish: /weather_add")
+        return lines
+    lines.append("📋 <b>Yozib qo'yilgan ob-havo</b>")
+    for r in records:
+        line = f"📅 {fmt_date(r['log_date'])} — {esc(r['weather_type'])}"
+        if r["temp"] is not None:
+            line += f", 🌡 {fmt_num(r['temp'])}°C"
+        if r["note"]:
+            line += f"\n   📝 {esc(cut(r['note'], 120))}"
+        lines.append(line)
+    return lines
+
+
 async def _show_weather(target, user_id, city, country, edit):
     city_name = city["name"] or country["name"]
     result = await fetch_weather(city_name)
-    if not result:
-        await _reply(target, "Ob-havo topilmadi. Shahar nomini tekshiring yoki keyinroq urinib ko'ring.", edit)
-        return
-    desc = WEATHER_CODES.get(result["code"], "🌡")
-    text = (
-        f"🌤 <b>{result['city']}</b>\n{desc}\n"
-        f"🌡 Harorat: {result['temp']}°C\n💨 Shamol: {result['wind']} km/soat"
-    )
-    weather_cache[user_id] = {"text": text, "city_id": city["id"]}
-    await _reply(target, text, edit, reply_markup=kb.weather_save_kb())
+    keyboard = None
+    if result:
+        desc = WEATHER_CODES.get(result["code"], "🌡 Ob-havo")
+        lines = [
+            f"🌤 <b>{esc(result['city'])}</b> — hozir",
+            desc,
+            f"🌡 {fmt_num(result['temp'])}°C · 💨 {fmt_num(result['wind'])} km/soat",
+        ]
+        keyboard = kb.weather_save_kb(city["id"])
+    else:
+        lines = [f"🌤 <b>{esc(city['name'])}</b>", "Hozirgi ob-havoni olib bo'lmadi (shahar nomini tekshiring yoki keyinroq urinib ko'ring)."]
+    lines += _weather_record_lines(db.get_weather_log(city["id"], limit=10))
+    text = "\n".join(lines)
+    if result:
+        weather_cache[(user_id, city["id"])] = {
+            "text": text, "condition": desc, "temp": result["temp"], "wind": result["wind"],
+        }
+    await _reply(target, text, edit, reply_markup=keyboard)
 
 
-@router.callback_query(F.data == "save_weather")
+@router.callback_query(F.data.startswith("save_weather:"))
 async def cb_save_weather(callback: CallbackQuery):
-    cached = weather_cache.get(callback.from_user.id)
-    if cached:
-        db.add_diary(cached["city_id"], str(date.today()), cached["text"], None)
-        await callback.message.edit_text(cached["text"] + "\n\n✅ Kundalikka saqlandi")
+    city = own_city(callback.from_user.id, callback.data.split(":", 1)[1])
+    if not city:
+        await callback.answer(NOT_FOUND, show_alert=True)
+        return
+    cached = weather_cache.get((callback.from_user.id, city["id"]))
+    if not cached:
+        await callback.answer("Ob-havo eskirgan, /weather ni qaytadan bosing", show_alert=True)
+        return
+    db.add_weather(
+        city["id"], str(today()), cached["condition"], cached["temp"], f"Shamol: {fmt_num(cached['wind'])} km/soat"
+    )
+    await callback.message.edit_text(cached["text"] + "\n\n✅ Ob-havo yozuviga saqlandi")
     await callback.answer()
+
+
+@router.message(Command("weather_add"))
+async def weather_add_start(message: Message, state: FSMContext):
+    await _start_pick(message, state, "weather_add")
+
+
+async def _weather_ask_condition(answer_func, state: FSMContext):
+    await state.set_state(WeatherAdd.condition)
+    await answer_func("Havo qanday edi?", reply_markup=kb.weather_cond_kb())
+
+
+@router.callback_query(WeatherAdd.date, F.data.startswith("wdate:"))
+async def weather_add_date(callback: CallbackQuery, state: FSMContext):
+    val = callback.data.split(":", 1)[1]
+    if val == "other":
+        await state.set_state(WeatherAdd.date_custom)
+        await callback.message.edit_text("📅 Sanani yozing (masalan: 15.09.2026 yoki 15.09):")
+        await callback.answer()
+        return
+    if val == "today":
+        d = today()
+    elif val == "yesterday":
+        d = today() - timedelta(days=1)
+    else:
+        await callback.answer()
+        return
+    await state.update_data(log_date=d.isoformat())
+    await _weather_ask_condition(callback.message.edit_text, state)
+    await callback.answer()
+
+
+@router.message(WeatherAdd.date_custom, F.text, ~F.text.startswith("/"))
+async def weather_add_date_custom(message: Message, state: FSMContext):
+    d = parse_date(message.text)
+    if not d:
+        await message.answer("Sanani tushunmadim. Masalan: 15.09.2026 yoki 15.09")
+        return
+    if d > today():
+        await message.answer("Kelajak sanasini yozib bo'lmaydi. Boshqa sana kiriting:")
+        return
+    await state.update_data(log_date=d.isoformat())
+    await _weather_ask_condition(message.answer, state)
+
+
+@router.callback_query(WeatherAdd.condition, F.data.startswith("wcond:"))
+async def weather_add_condition(callback: CallbackQuery, state: FSMContext):
+    label = kb.WEATHER_CONDITIONS.get(callback.data.split(":", 1)[1])
+    if not label:
+        await callback.answer()
+        return
+    await state.update_data(condition=label)
+    await state.set_state(WeatherAdd.temp)
+    await callback.message.edit_text(
+        f"{label}\n🌡 Harorat (°C)? Masalan: 24 yoki -3", reply_markup=kb.skip_kb("skip_wtemp")
+    )
+    await callback.answer()
+
+
+@router.message(WeatherAdd.temp, F.text, ~F.text.startswith("/"))
+async def weather_add_temp(message: Message, state: FSMContext):
+    temp = parse_temp(message.text)
+    if temp is None:
+        await message.answer("Tushunmadim. Masalan: 24 yoki -3 — yoki tugmani bosing.")
+        return
+    await state.update_data(temp=temp)
+    await state.set_state(WeatherAdd.note)
+    await message.answer("📝 Izoh (masalan: 'shamol kuchli edi'):", reply_markup=kb.skip_kb("skip_wnote"))
+
+
+@router.callback_query(WeatherAdd.temp, F.data == "skip_wtemp")
+async def weather_add_temp_skip(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(temp=None)
+    await state.set_state(WeatherAdd.note)
+    await callback.message.edit_text("📝 Izoh (masalan: 'shamol kuchli edi'):", reply_markup=kb.skip_kb("skip_wnote"))
+    await callback.answer()
+
+
+@router.message(WeatherAdd.note, F.text, ~F.text.startswith("/"))
+async def weather_add_note(message: Message, state: FSMContext):
+    await _finish_weather_add(state, message.text.strip(), message.answer)
+
+
+@router.callback_query(WeatherAdd.note, F.data == "skip_wnote")
+async def weather_add_note_skip(callback: CallbackQuery, state: FSMContext):
+    await _finish_weather_add(state, None, callback.message.edit_text)
+    await callback.answer()
+
+
+async def _finish_weather_add(state, note, answer_func):
+    data = await state.get_data()
+    city = db.get_city(data["city_id"])
+    country = db.get_country(city["country_id"])
+    db.add_weather(data["city_id"], data["log_date"], data["condition"], data.get("temp"), note)
+    await state.clear()
+    text = f"✅ Ob-havo yozildi\n📅 {fmt_date(data['log_date'])} — {esc(data['condition'])}"
+    if data.get("temp") is not None:
+        text += f", 🌡 {fmt_num(data['temp'])}°C"
+    if note:
+        text += f"\n📝 {esc(note)}"
+    text += f"\n🏙 {esc(country['name'])} — {esc(city['name'])}"
+    await answer_func(text)
 
 
 # ================= STATS =================
@@ -1176,17 +1708,41 @@ async def cb_save_weather(callback: CallbackQuery):
 @router.message(Command("stats"))
 async def cmd_stats(message: Message):
     s = db.get_stats(message.from_user.id)
-    text = (
-        "📊 <b>Statistika</b>\n\n"
-        f"✅ Borgan davlatlar: {s['visited_count']}\n"
-        f"🎯 Wishlist: {s['wishlist_count']}\n"
-        f"📍 Saqlangan joylar: {s['places_count']}\n"
-        f"💵 Jami sarflangan: {fmt_money(s['total_spent'])} so'm"
-    )
-    if s["top_category"]:
-        text += f"\n🔝 Eng ko'p sarflangan toifa: {s['top_category']['category']} ({fmt_money(s['top_category']['total'])})"
-    if s["most_expensive"]:
-        text += f"\n💸 Eng qimmat davlat: {s['most_expensive']['name']} ({fmt_money(s['most_expensive']['total'])} so'm)"
-    if s["cheapest"]:
-        text += f"\n💵 Eng arzon davlat: {s['cheapest']['name']} ({fmt_money(s['cheapest']['total'])} so'm)"
-    await message.answer(text)
+    lines = [
+        "📊 <b>Statistika</b>",
+        "",
+        f"✅ Borgan davlatlar: {s['visited_count']}",
+        f"🎯 Wishlist: {s['wishlist_count']}",
+        f"📍 Saqlangan joylar: {s['places_count']}",
+        "",
+    ]
+    if not s["totals"]:
+        lines.append("💵 Hali xarajat qo'shilmagan.")
+    else:
+        lines.append("💵 <b>Jami sarflangan</b>")
+        for r in sort_by_currency(s["totals"]):
+            lines.append(f"• {fmt_amount(r['total'], r['currency'])}")
+
+        best = {}
+        for r in s["by_category"]:
+            cur = r["currency"]
+            if cur not in best or r["total"] > best[cur]["total"]:
+                best[cur] = r
+        lines += ["", "🔝 <b>Eng ko'p sarflangan toifa</b>"]
+        for r in sort_by_currency(best.values()):
+            lines.append(f"• {esc(r['category'])}: {fmt_amount(r['total'], r['currency'])}")
+
+        by_cur = {}
+        for r in s["by_country"]:
+            by_cur.setdefault(r["currency"], []).append(r)
+        country_lines = []
+        for cur, rows in sorted(by_cur.items(), key=lambda kv: currency_key(kv[0])):
+            if len(rows) < 2:  # solishtirish uchun kamida 2 ta davlat kerak
+                continue
+            hi = max(rows, key=lambda x: x["total"])
+            lo = min(rows, key=lambda x: x["total"])
+            country_lines.append(f"💸 Eng qimmat ({cur_sym(cur)}): {esc(hi['name'])} — {fmt_amount(hi['total'], cur)}")
+            country_lines.append(f"💵 Eng arzon ({cur_sym(cur)}): {esc(lo['name'])} — {fmt_amount(lo['total'], cur)}")
+        if country_lines:
+            lines += [""] + country_lines
+    await message.answer("\n".join(lines))

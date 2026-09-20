@@ -78,10 +78,25 @@ def rating_kb():
     return b.as_markup()
 
 
+EXPENSE_CATEGORIES = [
+    "✈️ Aviachipta", "🏨 Mehmonxona", "🍽 Ovqat", "🚕 Transport", "🎟 Kirish/faoliyat", "🛍 Xarid", "📌 Boshqa",
+]
+
+WEATHER_CONDITIONS = {
+    "clear": "☀️ Ochiq",
+    "partly": "⛅ Qisman bulutli",
+    "cloudy": "☁️ Bulutli",
+    "rain": "🌧 Yomg'ir",
+    "storm": "⛈ Momaqaldiroq",
+    "snow": "❄️ Qor",
+    "fog": "🌫 Tuman",
+    "wind": "💨 Shamolli",
+}
+
+
 def category_kb():
-    cats = ["✈️ Aviachipta", "🏨 Mehmonxona", "🍽 Ovqat", "🚕 Transport", "🎟 Kirish/faoliyat", "🛍 Xarid", "📌 Boshqa"]
     b = InlineKeyboardBuilder()
-    for c in cats:
+    for c in EXPENSE_CATEGORIES:
         b.button(text=c, callback_data=f"cat:{c}")
     b.adjust(2)
     return b.as_markup()
@@ -96,9 +111,36 @@ def places_link_kb(places):
     return b.as_markup()
 
 
-def weather_save_kb():
+def currency_kb():
     b = InlineKeyboardBuilder()
-    b.button(text="📔 Kundalikka saqlash", callback_data="save_weather")
+    b.button(text="🇺🇿 So'm", callback_data="cur:UZS")
+    b.button(text="💵 Dollar ($)", callback_data="cur:USD")
+    b.button(text="💶 Evro (€)", callback_data="cur:EUR")
+    b.button(text="✏️ Boshqa valyuta", callback_data="cur:other")
+    b.adjust(3, 1)
+    return b.as_markup()
+
+
+def weather_save_kb(city_id):
+    b = InlineKeyboardBuilder()
+    b.button(text="💾 Ob-havo yozuviga saqlash", callback_data=f"save_weather:{city_id}")
+    return b.as_markup()
+
+
+def weather_date_kb():
+    b = InlineKeyboardBuilder()
+    b.button(text="📅 Bugun", callback_data="wdate:today")
+    b.button(text="🕐 Kecha", callback_data="wdate:yesterday")
+    b.button(text="✏️ Boshqa sana", callback_data="wdate:other")
+    b.adjust(2, 1)
+    return b.as_markup()
+
+
+def weather_cond_kb():
+    b = InlineKeyboardBuilder()
+    for key, label in WEATHER_CONDITIONS.items():
+        b.button(text=label, callback_data=f"wcond:{key}")
+    b.adjust(2)
     return b.as_markup()
 
 

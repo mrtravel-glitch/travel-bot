@@ -15,6 +15,8 @@ class TripAdd(StatesGroup):
     new_country_name = State()
     status = State()
     budget = State()
+    budget_currency = State()
+    budget_currency_other = State()
     budget_period = State()
     notes = State()
     select_city = State()
@@ -54,6 +56,8 @@ class ContactAdd(StatesGroup):
 class ExpenseAdd(StatesGroup):
     category = State()
     amount = State()
+    currency = State()
+    currency_other = State()
     place = State()
     note = State()
 
@@ -61,3 +65,11 @@ class ExpenseAdd(StatesGroup):
 class FileAdd(StatesGroup):
     file = State()
     notes = State()
+
+
+class WeatherAdd(StatesGroup):
+    date = State()
+    date_custom = State()
+    condition = State()
+    temp = State()
+    note = State()

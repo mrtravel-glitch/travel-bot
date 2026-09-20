@@ -15,7 +15,8 @@ def init_db():
         status TEXT NOT NULL CHECK (status IN ('visited','wishlist')),
         budget NUMERIC,
         budget_period TEXT,
-        notes TEXT
+        notes TEXT,
+        budget_currency TEXT DEFAULT 'UZS'
     );
 
     CREATE TABLE IF NOT EXISTS cities (
@@ -71,7 +72,7 @@ def init_db():
         city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
         category TEXT NOT NULL,
         amount NUMERIC NOT NULL,
-        currency TEXT DEFAULT 'so''m',
+        currency TEXT DEFAULT 'UZS',
         expense_date TEXT,
         place_id INTEGER REFERENCES places(id) ON DELETE SET NULL,
         note TEXT
@@ -85,6 +86,20 @@ def init_db():
         file_name TEXT,
         notes TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS weather_log (
+        id SERIAL PRIMARY KEY,
+        city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
+        log_date TEXT NOT NULL,
+        weather_type TEXT NOT NULL,
+        temp NUMERIC,
+        note TEXT
+    );
+
+    -- Eski bazalar uchun: har safar xavfsiz ishlaydi, malumotlarni ochirmaydi
+    ALTER TABLE countries ADD COLUMN IF NOT EXISTS budget_currency TEXT DEFAULT 'UZS';
+    UPDATE countries SET budget_currency='UZS' WHERE budget_currency IS NULL;
+    UPDATE expenses SET currency='UZS' WHERE currency IS NULL OR currency='so''m';
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -123,11 +138,11 @@ def _run(query, params=()):
 
 # ---------- Countries ----------
 
-def add_country(user_id, name, status, budget=None, budget_period=None, notes=None):
+def add_country(user_id, name, status, budget=None, budget_period=None, notes=None, budget_currency="UZS"):
     row = _one(
-        "INSERT INTO countries (user_id, name, status, budget, budget_period, notes) "
-        "VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
-        (user_id, name, status, budget, budget_period, notes),
+        "INSERT INTO countries (user_id, name, status, budget, budget_period, notes, budget_currency) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+        (user_id, name, status, budget, budget_period, notes, budget_currency or "UZS"),
     )
     return row["id"]
 
@@ -147,6 +162,28 @@ def get_countries(user_id, status=None):
 
 def get_country(country_id):
     return _one("SELECT * FROM countries WHERE id=%s", (country_id,))
+
+
+# ---------- Egalik tekshiruvi (boshqa foydalanuvchi ID'sidan himoya) ----------
+
+def get_country_owned(user_id, country_id):
+    return _one("SELECT * FROM countries WHERE id=%s AND user_id=%s", (country_id, user_id))
+
+
+def get_city_owned(user_id, city_id):
+    return _one(
+        "SELECT ci.* FROM cities ci JOIN countries co ON ci.country_id=co.id "
+        "WHERE ci.id=%s AND co.user_id=%s",
+        (city_id, user_id),
+    )
+
+
+def get_place_owned(user_id, place_id):
+    return _one(
+        "SELECT p.* FROM places p JOIN cities ci ON p.city_id=ci.id "
+        "JOIN countries co ON ci.country_id=co.id WHERE p.id=%s AND co.user_id=%s",
+        (place_id, user_id),
+    )
 
 
 # ---------- Cities ----------
@@ -206,7 +243,7 @@ def add_diary(city_id, entry_date, text, photo_file_id=None):
 
 
 def get_diary(city_id):
-    return _all("SELECT * FROM diary WHERE city_id=%s ORDER BY entry_date DESC", (city_id,))
+    return _all("SELECT * FROM diary WHERE city_id=%s ORDER BY entry_date DESC, id DESC", (city_id,))
 
 
 # ---------- Places ----------
@@ -264,24 +301,52 @@ def add_expense(city_id, category, amount, currency, expense_date, place_id, not
     )
 
 
-def get_expenses(city_id):
-    return _all("SELECT * FROM expenses WHERE city_id=%s ORDER BY id DESC", (city_id,))
+def get_expenses(city_id, limit=50):
+    return _all(
+        "SELECT e.*, p.name AS place_name FROM expenses e LEFT JOIN places p ON e.place_id=p.id "
+        "WHERE e.city_id=%s ORDER BY e.id DESC LIMIT %s",
+        (city_id, limit),
+    )
 
 
 def get_expense_summary(city_id):
     return _all(
-        "SELECT category, SUM(amount) as total, currency FROM expenses "
-        "WHERE city_id=%s GROUP BY category, currency",
+        "SELECT category, SUM(amount) AS total, currency FROM expenses "
+        "WHERE city_id=%s GROUP BY category, currency ORDER BY currency, SUM(amount) DESC",
         (city_id,),
     )
 
 
-def get_country_expense_total(country_id):
-    row = _one(
-        "SELECT SUM(e.amount) s FROM expenses e JOIN cities ci ON e.city_id=ci.id WHERE ci.country_id=%s",
+def get_city_expense_totals(city_id):
+    return _all(
+        "SELECT currency, SUM(amount) AS total FROM expenses WHERE city_id=%s "
+        "GROUP BY currency ORDER BY currency",
+        (city_id,),
+    )
+
+
+def get_country_expense_totals(country_id):
+    return _all(
+        "SELECT e.currency, SUM(e.amount) AS total FROM expenses e JOIN cities ci ON e.city_id=ci.id "
+        "WHERE ci.country_id=%s GROUP BY e.currency ORDER BY e.currency",
         (country_id,),
     )
-    return float(row["s"] or 0)
+
+
+# ---------- Weather log ----------
+
+def add_weather(city_id, log_date, condition, temp, note):
+    _run(
+        "INSERT INTO weather_log (city_id, log_date, weather_type, temp, note) VALUES (%s,%s,%s,%s,%s)",
+        (city_id, log_date, condition, temp, note),
+    )
+
+
+def get_weather_log(city_id, limit=10):
+    return _all(
+        "SELECT * FROM weather_log WHERE city_id=%s ORDER BY log_date DESC, id DESC LIMIT %s",
+        (city_id, limit),
+    )
 
 
 # ---------- Files ----------
@@ -306,41 +371,33 @@ def get_stats(user_id):
     wishlist_count = _one(
         "SELECT COUNT(*) c FROM countries WHERE user_id=%s AND status='wishlist'", (user_id,)
     )["c"]
-    total_row = _one(
-        "SELECT SUM(e.amount) s FROM expenses e JOIN cities ci ON e.city_id=ci.id "
-        "JOIN countries co ON ci.country_id=co.id WHERE co.user_id=%s",
-        (user_id,),
-    )
-    total_spent = float(total_row["s"] or 0)
     places_count = _one(
         "SELECT COUNT(*) c FROM places p JOIN cities ci ON p.city_id=ci.id "
         "JOIN countries co ON ci.country_id=co.id WHERE co.user_id=%s",
         (user_id,),
     )["c"]
-    top_category = _one(
-        "SELECT e.category, SUM(e.amount) total FROM expenses e JOIN cities ci ON e.city_id=ci.id "
+    base = (
+        "FROM expenses e JOIN cities ci ON e.city_id=ci.id "
         "JOIN countries co ON ci.country_id=co.id WHERE co.user_id=%s "
-        "GROUP BY e.category ORDER BY total DESC LIMIT 1",
+    )
+    totals = _all(
+        "SELECT e.currency, SUM(e.amount) AS total " + base + "GROUP BY e.currency ORDER BY e.currency",
         (user_id,),
     )
-    most_expensive = _one(
-        "SELECT co.name, SUM(e.amount) total FROM expenses e JOIN cities ci ON e.city_id=ci.id "
-        "JOIN countries co ON ci.country_id=co.id WHERE co.user_id=%s "
-        "GROUP BY co.id, co.name ORDER BY total DESC LIMIT 1",
+    by_category = _all(
+        "SELECT e.currency, e.category, SUM(e.amount) AS total " + base + "GROUP BY e.currency, e.category",
         (user_id,),
     )
-    cheapest = _one(
-        "SELECT co.name, SUM(e.amount) total FROM expenses e JOIN cities ci ON e.city_id=ci.id "
-        "JOIN countries co ON ci.country_id=co.id WHERE co.user_id=%s "
-        "GROUP BY co.id, co.name ORDER BY total ASC LIMIT 1",
+    by_country = _all(
+        "SELECT co.id, co.name, e.currency, SUM(e.amount) AS total " + base
+        + "GROUP BY co.id, co.name, e.currency",
         (user_id,),
     )
     return {
         "visited_count": visited_count,
         "wishlist_count": wishlist_count,
-        "total_spent": total_spent,
         "places_count": places_count,
-        "top_category": dict(top_category) if top_category else None,
-        "most_expensive": dict(most_expensive) if most_expensive else None,
-        "cheapest": dict(cheapest) if cheapest else None,
+        "totals": totals,
+        "by_category": by_category,
+        "by_country": by_country,
     }
