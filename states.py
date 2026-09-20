@@ -12,6 +12,10 @@ class TripAdd(StatesGroup):
     new_city_name = State()
 
 
+class TripsNewCity(StatesGroup):
+    name = State()
+
+
 class DiaryAdd(StatesGroup):
     text = State()
 
