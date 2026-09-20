@@ -1,3 +1,4 @@
+import re
 from datetime import date
 
 import aiohttp
@@ -31,6 +32,38 @@ def fmt_money(amount):
     return f"{amount:,.0f}".replace(",", " ")
 
 
+MONEY_MULTIPLIERS = [
+    (re.compile(r"mlrd|milliard|billion", re.IGNORECASE), 1_000_000_000),
+    (re.compile(r"mln|million", re.IGNORECASE), 1_000_000),
+    (re.compile(r"ming|k\b", re.IGNORECASE), 1_000),
+]
+
+BUDGET_PERIOD_LABELS = {"daily": "kunlik", "monthly": "oylik", "total": "umumiy"}
+
+
+def parse_money(text):
+    """'3000000', '3 mln', '500 ming', '1.5 mlrd' kabi kiritishlarni raqamga aylantiradi."""
+    if not text:
+        return None
+    t = text.strip().lower()
+    if not t:
+        return None
+    multiplier = 1
+    for pattern, mult in MONEY_MULTIPLIERS:
+        if pattern.search(t):
+            multiplier = mult
+            t = pattern.sub("", t)
+            break
+    t = t.replace(" ", "").replace(",", "")
+    t = re.sub(r"[^0-9.\-]", "", t)
+    if not t or t in ("-", "."):
+        return None
+    try:
+        return float(t) * multiplier
+    except ValueError:
+        return None
+
+
 def build_city_profile(country, city):
     emoji = "✅" if country["status"] == "visited" else "🎯"
     text = f"{emoji} <b>{country['name']}</b> — 🏙 {city['name']}"
@@ -52,10 +85,11 @@ def build_city_profile(country, city):
         f"🌍 {country['name']} bo'yicha jami: {fmt_money(country_total)} so'm"
     )
     if country["budget"]:
+        period = BUDGET_PERIOD_LABELS.get(country.get("budget_period") or "total", "umumiy")
         qoldiq = float(country["budget"]) - country_total
         holat = "✅" if qoldiq >= 0 else "⚠️"
         text += (
-            f"\n🎯 Byudjet: {fmt_money(country['budget'])} so'm"
+            f"\n🎯 Byudjet: {fmt_money(country['budget'])} so'm ({period})"
             f"\n{holat} Qoldiq: {fmt_money(qoldiq)} so'm"
         )
     return text
@@ -154,13 +188,41 @@ async def require_active_city(message: Message):
 
 @router.message(Command("trip_add"))
 async def trip_add_start(message: Message, state: FSMContext):
-    await state.set_state(TripAdd.country)
-    await message.answer("🌍 Davlat nomini kiriting (masalan: O'zbekiston):")
+    countries = db.get_countries(message.from_user.id)
+    if countries:
+        await state.set_state(TripAdd.select_country)
+        await message.answer(
+            "🌍 Qaysi davlat?", reply_markup=kb.country_select_kb(countries, prefix="tripadd_country")
+        )
+    else:
+        await state.set_state(TripAdd.new_country_name)
+        await message.answer("🌍 Davlat nomini kiriting (masalan: O'zbekiston):")
 
 
-@router.message(TripAdd.country)
-async def trip_add_country(message: Message, state: FSMContext):
-    await state.update_data(country=message.text.strip())
+@router.callback_query(TripAdd.select_country, F.data.startswith("tripadd_country:"))
+async def trip_add_select_country(callback: CallbackQuery, state: FSMContext):
+    val = callback.data.split(":", 1)[1]
+    if val == "new":
+        await state.set_state(TripAdd.new_country_name)
+        await callback.message.edit_text("🌍 Yangi davlat nomini kiriting:")
+        await callback.answer()
+        return
+    country_id = int(val)
+    await state.update_data(country_id=country_id)
+    await _trip_ask_city(callback.message.edit_text, state, country_id)
+    await callback.answer()
+
+
+@router.message(TripAdd.new_country_name)
+async def trip_add_new_country_name(message: Message, state: FSMContext):
+    name = message.text.strip()
+    existing = db.find_country_by_name(message.from_user.id, name)
+    if existing:
+        await state.update_data(country_id=existing["id"])
+        await message.answer(f"ℹ️ \"{existing['name']}\" allaqachon mavjud, unga bog'landi.")
+        await _trip_ask_city(message.answer, state, existing["id"])
+        return
+    await state.update_data(new_country_name=name)
     await state.set_state(TripAdd.status)
     await message.answer("Holati qanday?", reply_markup=kb.status_kb())
 
@@ -171,7 +233,7 @@ async def trip_add_status(callback: CallbackQuery, state: FSMContext):
     await state.update_data(status=status)
     await state.set_state(TripAdd.budget)
     await callback.message.edit_text(
-        "💰 Rejalashtirilgan byudjet (so'mda, masalan 3000000):",
+        "💰 Rejalashtirilgan byudjet? (masalan: 3000000, yoki \"3 mln\", \"500 ming\")",
         reply_markup=kb.skip_kb("skip_budget"),
     )
     await callback.answer()
@@ -179,20 +241,27 @@ async def trip_add_status(callback: CallbackQuery, state: FSMContext):
 
 @router.message(TripAdd.budget)
 async def trip_add_budget(message: Message, state: FSMContext):
-    text = message.text.strip().replace(" ", "").replace(",", "")
-    try:
-        budget = float(text)
-    except ValueError:
-        await message.answer("Iltimos, faqat raqam kiriting, yoki tugmani bosing.")
+    budget = parse_money(message.text)
+    if budget is None:
+        await message.answer("Tushunmadim. Masalan: 3000000, \"3 mln\", \"500 ming\" — yoki tugmani bosing.")
         return
     await state.update_data(budget=budget)
-    await state.set_state(TripAdd.notes)
-    await message.answer("Izoh qoldirmoqchimisiz?", reply_markup=kb.skip_kb("skip_trip_notes"))
+    await state.set_state(TripAdd.budget_period)
+    await message.answer("Bu byudjet qanday?", reply_markup=kb.budget_period_kb())
 
 
 @router.callback_query(TripAdd.budget, F.data == "skip_budget")
 async def trip_add_budget_skip(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(budget=None)
+    await state.update_data(budget=None, budget_period=None)
+    await state.set_state(TripAdd.notes)
+    await callback.message.edit_text("Izoh qoldirmoqchimisiz?", reply_markup=kb.skip_kb("skip_trip_notes"))
+    await callback.answer()
+
+
+@router.callback_query(TripAdd.budget_period, F.data.startswith("bperiod:"))
+async def trip_add_budget_period(callback: CallbackQuery, state: FSMContext):
+    period = callback.data.split(":")[1]
+    await state.update_data(budget_period=period)
     await state.set_state(TripAdd.notes)
     await callback.message.edit_text("Izoh qoldirmoqchimisiz?", reply_markup=kb.skip_kb("skip_trip_notes"))
     await callback.answer()
@@ -200,49 +269,71 @@ async def trip_add_budget_skip(callback: CallbackQuery, state: FSMContext):
 
 @router.message(TripAdd.notes)
 async def trip_add_notes(message: Message, state: FSMContext):
-    await _trip_add_ask_city(message.from_user.id, state, message.text.strip(), message.answer)
+    await _trip_add_finish(message.from_user.id, state, message.text.strip(), message.answer)
 
 
 @router.callback_query(TripAdd.notes, F.data == "skip_trip_notes")
 async def trip_add_notes_skip(callback: CallbackQuery, state: FSMContext):
-    await _trip_add_ask_city(callback.from_user.id, state, None, callback.message.edit_text)
+    await _trip_add_finish(callback.from_user.id, state, None, callback.message.edit_text)
     await callback.answer()
 
 
-async def _trip_add_ask_city(user_id, state, notes, answer_func):
+async def _trip_add_finish(user_id, state, notes, answer_func):
     data = await state.get_data()
-    country_id = db.add_country(user_id, data["country"], data["status"], data.get("budget"), notes)
+    country_id = db.add_country(
+        user_id, data["new_country_name"], data["status"],
+        data.get("budget"), data.get("budget_period"), notes,
+    )
     await state.update_data(country_id=country_id)
-    await state.set_state(TripAdd.first_city)
-    await answer_func("🏙 Birinchi shahar nomini kiriting:", reply_markup=kb.skip_kb("skip_first_city"))
+    await _trip_ask_city(answer_func, state, country_id)
 
 
-@router.message(TripAdd.first_city)
-async def trip_add_first_city(message: Message, state: FSMContext):
+async def _trip_ask_city(answer_func, state: FSMContext, country_id):
+    cities = db.get_cities(country_id)
+    if cities:
+        await state.set_state(TripAdd.select_city)
+        await answer_func("🏙 Qaysi shahar?", reply_markup=kb.city_select_kb(cities, prefix="tripadd_city"))
+    else:
+        await state.set_state(TripAdd.new_city_name)
+        await answer_func("🏙 Shahar nomini kiriting:")
+
+
+@router.callback_query(TripAdd.select_city, F.data.startswith("tripadd_city:"))
+async def trip_add_select_city(callback: CallbackQuery, state: FSMContext):
+    val = callback.data.split(":", 1)[1]
     data = await state.get_data()
-    city_id = db.add_city(data["country_id"], message.text.strip())
-    db.set_active(message.from_user.id, data["country_id"], city_id)
-    country = db.get_country(data["country_id"])
+    country_id = data["country_id"]
+    if val == "new":
+        await state.set_state(TripAdd.new_city_name)
+        await callback.message.edit_text("🏙 Yangi shahar nomini kiriting:")
+        await callback.answer()
+        return
+    city_id = int(val)
+    db.set_active(callback.from_user.id, country_id, city_id)
+    country = db.get_country(country_id)
     city = db.get_city(city_id)
     await state.clear()
-    emoji = "✅" if country["status"] == "visited" else "🎯"
-    await message.answer(
-        f"{emoji} Saqlandi: {country['name']}, {city['name']}\nBu endi sizning faol shahringiz."
-    )
-
-
-@router.callback_query(TripAdd.first_city, F.data == "skip_first_city")
-async def trip_add_first_city_skip(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    db.set_active(callback.from_user.id, data["country_id"], None)
-    country = db.get_country(data["country_id"])
-    await state.clear()
-    emoji = "✅" if country["status"] == "visited" else "🎯"
-    await callback.message.edit_text(
-        f"{emoji} Saqlandi: {country['name']}\n"
-        f"(hali shahar qo'shilmagan — /trips yoki /place_add orqali qo'shishingiz mumkin)"
-    )
+    await callback.message.edit_text(build_city_profile(country, city))
     await callback.answer()
+
+
+@router.message(TripAdd.new_city_name)
+async def trip_add_new_city_name(message: Message, state: FSMContext):
+    data = await state.get_data()
+    country_id = data["country_id"]
+    name = message.text.strip()
+    existing = db.find_city_by_name(country_id, name)
+    prefix_msg = ""
+    if existing:
+        city_id = existing["id"]
+        prefix_msg = "ℹ️ Bu shahar allaqachon mavjud, unga bog'landi.\n\n"
+    else:
+        city_id = db.add_city(country_id, name)
+    db.set_active(message.from_user.id, country_id, city_id)
+    country = db.get_country(country_id)
+    city = db.get_city(city_id)
+    await state.clear()
+    await message.answer(prefix_msg + build_city_profile(country, city))
 
 
 # ================= TRIPS (davlat + shahar tanlash) =================
@@ -387,7 +478,14 @@ async def place_add_country_select(callback: CallbackQuery, state: FSMContext):
 
 @router.message(PlaceAdd.new_country_name)
 async def place_add_new_country_name(message: Message, state: FSMContext):
-    await state.update_data(new_country_name=message.text.strip())
+    name = message.text.strip()
+    existing = db.find_country_by_name(message.from_user.id, name)
+    if existing:
+        await state.update_data(country_id=existing["id"])
+        await message.answer(f"ℹ️ \"{existing['name']}\" allaqachon mavjud, unga bog'landi.")
+        await _place_add_ask_city(message.answer, state, existing["id"])
+        return
+    await state.update_data(new_country_name=name)
     await state.set_state(PlaceAdd.new_country_status)
     await message.answer("Holati qanday?", reply_markup=kb.status_kb())
 
@@ -421,19 +519,34 @@ async def place_add_city_select(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     city_id = int(val)
-    await state.update_data(city_id=city_id)
-    await state.set_state(PlaceAdd.type)
-    await callback.message.edit_text("Turi qanday?", reply_markup=kb.place_type_kb())
+    await _place_after_city(city_id, state, callback.message.edit_text)
     await callback.answer()
 
 
 @router.message(PlaceAdd.new_city_name)
 async def place_add_new_city_name(message: Message, state: FSMContext):
     data = await state.get_data()
-    city_id = db.add_city(data["country_id"], message.text.strip())
+    country_id = data["country_id"]
+    name = message.text.strip()
+    existing = db.find_city_by_name(country_id, name)
+    if existing:
+        city_id = existing["id"]
+        await message.answer("ℹ️ Bu shahar allaqachon mavjud, unga bog'landi.")
+    else:
+        city_id = db.add_city(country_id, name)
+    await _place_after_city(city_id, state, message.answer)
+
+
+async def _place_after_city(city_id, state: FSMContext, answer_func):
+    data = await state.get_data()
+    existing_place = db.find_place_by_name(city_id, data["name"])
+    if existing_place:
+        await state.clear()
+        await answer_func("ℹ️ Bu nomli joy shu shaharda allaqachon mavjud:\n\n" + _place_line(existing_place))
+        return
     await state.update_data(city_id=city_id)
     await state.set_state(PlaceAdd.type)
-    await message.answer("Turi qanday?", reply_markup=kb.place_type_kb())
+    await answer_func("Turi qanday?", reply_markup=kb.place_type_kb())
 
 
 @router.callback_query(PlaceAdd.type, F.data.startswith("ptype:"))
@@ -723,11 +836,9 @@ async def expense_add_category(callback: CallbackQuery, state: FSMContext):
 
 @router.message(ExpenseAdd.amount)
 async def expense_add_amount(message: Message, state: FSMContext):
-    text = message.text.strip().replace(" ", "").replace(",", "")
-    try:
-        amount = float(text)
-    except ValueError:
-        await message.answer("Iltimos, faqat raqam kiriting (masalan: 35000)")
+    amount = parse_money(message.text)
+    if amount is None:
+        await message.answer("Tushunmadim. Masalan: 35000, \"35 ming\" — qaytadan kiriting.")
         return
     await state.update_data(amount=amount)
     city = db.get_active_city(message.from_user.id)
@@ -795,9 +906,10 @@ async def cmd_expenses(message: Message):
     lines.append(f"💵 Shu shahar: {fmt_money(city_total)} so'm")
     lines.append(f"🌍 {country['name']} bo'yicha jami: {fmt_money(country_total)} so'm")
     if country["budget"]:
+        period = BUDGET_PERIOD_LABELS.get(country.get("budget_period") or "total", "umumiy")
         qoldiq = float(country["budget"]) - country_total
         holat = "✅" if qoldiq >= 0 else "⚠️"
-        lines.append(f"🎯 Byudjet: {fmt_money(country['budget'])} so'm")
+        lines.append(f"🎯 Byudjet: {fmt_money(country['budget'])} so'm ({period})")
         lines.append(f"{holat} Qoldiq: {fmt_money(qoldiq)} so'm")
     await message.answer("\n".join(lines))
 

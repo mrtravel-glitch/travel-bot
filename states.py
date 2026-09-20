@@ -2,15 +2,14 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class TripAdd(StatesGroup):
-    country = State()
+    select_country = State()
+    new_country_name = State()
     status = State()
     budget = State()
+    budget_period = State()
     notes = State()
-    first_city = State()
-
-
-class TripsNewCity(StatesGroup):
-    name = State()
+    select_city = State()
+    new_city_name = State()
 
 
 class DiaryAdd(StatesGroup):

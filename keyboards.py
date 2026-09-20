@@ -21,6 +21,15 @@ def status_kb():
     return b.as_markup()
 
 
+def budget_period_kb():
+    b = InlineKeyboardBuilder()
+    b.button(text="💰 Umumiy", callback_data="bperiod:total")
+    b.button(text="📅 Kunlik", callback_data="bperiod:daily")
+    b.button(text="🗓 Oylik", callback_data="bperiod:monthly")
+    b.adjust(1)
+    return b.as_markup()
+
+
 def country_select_kb(countries, prefix, show_add=True):
     b = InlineKeyboardBuilder()
     for c in countries:

@@ -25,6 +25,7 @@ def init_db():
         name TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('visited','wishlist')),
         budget NUMERIC,
+        budget_period TEXT,
         notes TEXT
     );
 
@@ -133,12 +134,20 @@ def _run(query, params=()):
 
 # ---------- Countries ----------
 
-def add_country(user_id, name, status, budget=None, notes=None):
+def add_country(user_id, name, status, budget=None, budget_period=None, notes=None):
     row = _one(
-        "INSERT INTO countries (user_id, name, status, budget, notes) VALUES (%s,%s,%s,%s,%s) RETURNING id",
-        (user_id, name, status, budget, notes),
+        "INSERT INTO countries (user_id, name, status, budget, budget_period, notes) "
+        "VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+        (user_id, name, status, budget, budget_period, notes),
     )
     return row["id"]
+
+
+def find_country_by_name(user_id, name):
+    return _one(
+        "SELECT * FROM countries WHERE user_id=%s AND LOWER(name)=LOWER(%s) LIMIT 1",
+        (user_id, name.strip()),
+    )
 
 
 def get_countries(user_id, status=None):
@@ -156,6 +165,13 @@ def get_country(country_id):
 def add_city(country_id, name):
     row = _one("INSERT INTO cities (country_id, name) VALUES (%s,%s) RETURNING id", (country_id, name))
     return row["id"]
+
+
+def find_city_by_name(country_id, name):
+    return _one(
+        "SELECT * FROM cities WHERE country_id=%s AND LOWER(name)=LOWER(%s) LIMIT 1",
+        (country_id, name.strip()),
+    )
 
 
 def get_cities(country_id):
@@ -219,6 +235,13 @@ def get_places(city_id, ptype=None):
     if ptype:
         return _all("SELECT * FROM places WHERE city_id=%s AND type=%s ORDER BY id DESC", (city_id, ptype))
     return _all("SELECT * FROM places WHERE city_id=%s ORDER BY id DESC", (city_id,))
+
+
+def find_place_by_name(city_id, name):
+    return _one(
+        "SELECT * FROM places WHERE city_id=%s AND LOWER(name)=LOWER(%s) LIMIT 1",
+        (city_id, name.strip()),
+    )
 
 
 def add_place_photo(place_id, photo_file_id):
