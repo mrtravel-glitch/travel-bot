@@ -717,22 +717,49 @@ async def _send_place(target, p):
 
 @router.message(Command("places"))
 async def cmd_places(message: Message):
-    city = await require_active_city(message)
-    if not city:
+    countries = db.get_countries(message.from_user.id)
+    if not countries:
+        await message.answer("Hali davlat yo'q. /trip_add orqali qo'shing.")
         return
-    places = db.get_places(city["id"])
+    await message.answer(
+        "🌍 Qaysi davlat?", reply_markup=kb.country_select_kb(countries, prefix="places_country", show_add=False)
+    )
+
+
+@router.callback_query(F.data.startswith("places_country:"))
+async def cb_places_country(callback: CallbackQuery):
+    country_id = int(callback.data.split(":")[1])
+    cities = db.get_cities(country_id)
+    if not cities:
+        await callback.message.edit_text("Bu davlatda hali shahar yo'q.")
+        await callback.answer()
+        return
+    await callback.message.edit_text(
+        "🏙 Qaysi shahar?", reply_markup=kb.city_select_kb(cities, prefix=f"places_city:{country_id}", show_add=False)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("places_city:"))
+async def cb_places_city(callback: CallbackQuery):
+    _, _country_id_s, city_id_s = callback.data.split(":")
+    city_id = int(city_id_s)
+    places = db.get_places(city_id)
     if not places:
-        await message.answer("Bu shahar uchun hali joylar qo'shilmagan.")
+        await callback.message.edit_text("Bu shaharda hali joylar yo'q.")
+        await callback.answer()
         return
-    await message.answer(f"🏙 {city['name']} — qaysi turi?", reply_markup=kb.type_filter_kb())
+    city = db.get_city(city_id)
+    await callback.message.edit_text(f"🏙 {city['name']} — qaysi turi?", reply_markup=kb.type_filter_kb(city_id))
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("places_show:"))
 async def cb_places_show(callback: CallbackQuery):
-    ptype = callback.data.split(":")[1]
-    city = db.get_active_city(callback.from_user.id)
+    _, city_id_s, ptype = callback.data.split(":")
+    city_id = int(city_id_s)
     type_filter = None if ptype == "all" else ptype
-    places = db.get_places(city["id"], ptype=type_filter)
+    places = db.get_places(city_id, ptype=type_filter)
     await callback.answer()
     if not places:
         await callback.message.edit_text("Bu filtr bo'yicha joylar topilmadi.")

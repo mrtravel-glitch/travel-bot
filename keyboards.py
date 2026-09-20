@@ -102,11 +102,11 @@ def weather_save_kb():
     return b.as_markup()
 
 
-def type_filter_kb():
+def type_filter_kb(city_id):
     b = InlineKeyboardBuilder()
-    b.button(text="🏨 Mehmonxona", callback_data="places_show:hotel")
-    b.button(text="🍽 Restoran", callback_data="places_show:restaurant")
-    b.button(text="🏛 Ko'rish joyi", callback_data="places_show:attraction")
-    b.button(text="📋 Barchasi", callback_data="places_show:all")
+    b.button(text="🏨 Mehmonxona", callback_data=f"places_show:{city_id}:hotel")
+    b.button(text="🍽 Restoran", callback_data=f"places_show:{city_id}:restaurant")
+    b.button(text="🏛 Ko'rish joyi", callback_data=f"places_show:{city_id}:attraction")
+    b.button(text="📋 Barchasi", callback_data=f"places_show:{city_id}:all")
     b.adjust(1)
     return b.as_markup()
