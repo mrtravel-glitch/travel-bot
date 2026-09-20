@@ -8,18 +8,7 @@ from config import DATABASE_URL
 
 def init_db():
     ddl = """
-    DROP TABLE IF EXISTS place_photos CASCADE;
-    DROP TABLE IF EXISTS expenses CASCADE;
-    DROP TABLE IF EXISTS files CASCADE;
-    DROP TABLE IF EXISTS contacts CASCADE;
-    DROP TABLE IF EXISTS diary CASCADE;
-    DROP TABLE IF EXISTS places CASCADE;
-    DROP TABLE IF EXISTS cities CASCADE;
-    DROP TABLE IF EXISTS trips CASCADE;
-    DROP TABLE IF EXISTS countries CASCADE;
-    DROP TABLE IF EXISTS user_state CASCADE;
-
-    CREATE TABLE countries (
+    CREATE TABLE IF NOT EXISTS countries (
         id SERIAL PRIMARY KEY,
         user_id BIGINT NOT NULL,
         name TEXT NOT NULL,
@@ -29,19 +18,19 @@ def init_db():
         notes TEXT
     );
 
-    CREATE TABLE cities (
+    CREATE TABLE IF NOT EXISTS cities (
         id SERIAL PRIMARY KEY,
         country_id INTEGER NOT NULL REFERENCES countries(id) ON DELETE CASCADE,
         name TEXT NOT NULL
     );
 
-    CREATE TABLE user_state (
+    CREATE TABLE IF NOT EXISTS user_state (
         user_id BIGINT PRIMARY KEY,
         active_country_id INTEGER,
         active_city_id INTEGER
     );
 
-    CREATE TABLE diary (
+    CREATE TABLE IF NOT EXISTS diary (
         id SERIAL PRIMARY KEY,
         city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
         entry_date TEXT NOT NULL,
@@ -49,7 +38,7 @@ def init_db():
         photo_file_id TEXT
     );
 
-    CREATE TABLE places (
+    CREATE TABLE IF NOT EXISTS places (
         id SERIAL PRIMARY KEY,
         city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
         name TEXT NOT NULL,
@@ -63,13 +52,13 @@ def init_db():
         notes TEXT
     );
 
-    CREATE TABLE place_photos (
+    CREATE TABLE IF NOT EXISTS place_photos (
         id SERIAL PRIMARY KEY,
         place_id INTEGER NOT NULL REFERENCES places(id) ON DELETE CASCADE,
         photo_file_id TEXT NOT NULL
     );
 
-    CREATE TABLE contacts (
+    CREATE TABLE IF NOT EXISTS contacts (
         id SERIAL PRIMARY KEY,
         city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
         name TEXT NOT NULL,
@@ -77,7 +66,7 @@ def init_db():
         notes TEXT
     );
 
-    CREATE TABLE expenses (
+    CREATE TABLE IF NOT EXISTS expenses (
         id SERIAL PRIMARY KEY,
         city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
         category TEXT NOT NULL,
@@ -88,7 +77,7 @@ def init_db():
         note TEXT
     );
 
-    CREATE TABLE files (
+    CREATE TABLE IF NOT EXISTS files (
         id SERIAL PRIMARY KEY,
         city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
         file_id TEXT NOT NULL,

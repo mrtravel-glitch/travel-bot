@@ -1,6 +1,15 @@
 from aiogram.fsm.state import State, StatesGroup
 
 
+class Pick(StatesGroup):
+    """Kundalik/kontakt/fayl/xarajat/ob-havo uchun umumiy davlat -> shahar tanlash."""
+    country = State()
+    new_country_name = State()
+    new_country_status = State()
+    city = State()
+    new_city_name = State()
+
+
 class TripAdd(StatesGroup):
     select_country = State()
     new_country_name = State()
