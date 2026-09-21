@@ -1,30 +1,15 @@
 from aiogram.fsm.state import State, StatesGroup
 
 
-class Pick(StatesGroup):
-    """Kundalik/kontakt/fayl/xarajat/ob-havo uchun umumiy davlat -> shahar tanlash."""
-    country = State()
-    new_country_name = State()
-    new_country_status = State()
-    city = State()
-    new_city_name = State()
-
-
 class TripAdd(StatesGroup):
     select_country = State()
     new_country_name = State()
     status = State()
+    budget = State()
+    budget_period = State()
     notes = State()
     select_city = State()
     new_city_name = State()
-
-
-class BudgetSet(StatesGroup):
-    """Shahar byudjetini belgilash (yangi shahar qo'shilganda ham, /budget da ham)."""
-    amount = State()
-    currency = State()
-    currency_other = State()
-    period = State()
 
 
 class TripsNewCity(StatesGroup):
@@ -60,8 +45,6 @@ class ContactAdd(StatesGroup):
 class ExpenseAdd(StatesGroup):
     category = State()
     amount = State()
-    currency = State()
-    currency_other = State()
     place = State()
     note = State()
 
@@ -71,9 +54,6 @@ class FileAdd(StatesGroup):
     notes = State()
 
 
-class WeatherAdd(StatesGroup):
-    date = State()
-    date_custom = State()
-    condition = State()
-    temp = State()
-    note = State()
+class ManageEdit(StatesGroup):
+    text_input = State()
+    budget_period = State()

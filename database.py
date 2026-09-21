@@ -8,37 +8,40 @@ from config import DATABASE_URL
 
 def init_db():
     ddl = """
-    CREATE TABLE IF NOT EXISTS countries (
+    DROP TABLE IF EXISTS place_photos CASCADE;
+    DROP TABLE IF EXISTS expenses CASCADE;
+    DROP TABLE IF EXISTS files CASCADE;
+    DROP TABLE IF EXISTS contacts CASCADE;
+    DROP TABLE IF EXISTS diary CASCADE;
+    DROP TABLE IF EXISTS places CASCADE;
+    DROP TABLE IF EXISTS cities CASCADE;
+    DROP TABLE IF EXISTS trips CASCADE;
+    DROP TABLE IF EXISTS countries CASCADE;
+    DROP TABLE IF EXISTS user_state CASCADE;
+
+    CREATE TABLE countries (
         id SERIAL PRIMARY KEY,
         user_id BIGINT NOT NULL,
         name TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('visited','wishlist')),
         budget NUMERIC,
         budget_period TEXT,
-        notes TEXT,
-        budget_currency TEXT DEFAULT 'UZS'
+        notes TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS cities (
+    CREATE TABLE cities (
         id SERIAL PRIMARY KEY,
         country_id INTEGER NOT NULL REFERENCES countries(id) ON DELETE CASCADE,
-        name TEXT NOT NULL,
-        budget NUMERIC,
-        budget_period TEXT,
-        budget_currency TEXT DEFAULT 'UZS'
+        name TEXT NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-        name TEXT PRIMARY KEY
-    );
-
-    CREATE TABLE IF NOT EXISTS user_state (
+    CREATE TABLE user_state (
         user_id BIGINT PRIMARY KEY,
         active_country_id INTEGER,
         active_city_id INTEGER
     );
 
-    CREATE TABLE IF NOT EXISTS diary (
+    CREATE TABLE diary (
         id SERIAL PRIMARY KEY,
         city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
         entry_date TEXT NOT NULL,
@@ -46,7 +49,7 @@ def init_db():
         photo_file_id TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS places (
+    CREATE TABLE places (
         id SERIAL PRIMARY KEY,
         city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
         name TEXT NOT NULL,
@@ -60,13 +63,13 @@ def init_db():
         notes TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS place_photos (
+    CREATE TABLE place_photos (
         id SERIAL PRIMARY KEY,
         place_id INTEGER NOT NULL REFERENCES places(id) ON DELETE CASCADE,
         photo_file_id TEXT NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS contacts (
+    CREATE TABLE contacts (
         id SERIAL PRIMARY KEY,
         city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
         name TEXT NOT NULL,
@@ -74,18 +77,18 @@ def init_db():
         notes TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS expenses (
+    CREATE TABLE expenses (
         id SERIAL PRIMARY KEY,
         city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
         category TEXT NOT NULL,
         amount NUMERIC NOT NULL,
-        currency TEXT DEFAULT 'UZS',
+        currency TEXT DEFAULT 'so''m',
         expense_date TEXT,
         place_id INTEGER REFERENCES places(id) ON DELETE SET NULL,
         note TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS files (
+    CREATE TABLE files (
         id SERIAL PRIMARY KEY,
         city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
         file_id TEXT NOT NULL,
@@ -93,39 +96,10 @@ def init_db():
         file_name TEXT,
         notes TEXT
     );
-
-    CREATE TABLE IF NOT EXISTS weather_log (
-        id SERIAL PRIMARY KEY,
-        city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
-        log_date TEXT NOT NULL,
-        weather_type TEXT NOT NULL,
-        temp NUMERIC,
-        note TEXT
-    );
-
-    -- Eski bazalar uchun: har safar xavfsiz ishlaydi, malumotlarni ochirmaydi
-    ALTER TABLE countries ADD COLUMN IF NOT EXISTS budget_currency TEXT DEFAULT 'UZS';
-    UPDATE countries SET budget_currency='UZS' WHERE budget_currency IS NULL;
-    ALTER TABLE cities ADD COLUMN IF NOT EXISTS budget NUMERIC;
-    ALTER TABLE cities ADD COLUMN IF NOT EXISTS budget_period TEXT;
-    ALTER TABLE cities ADD COLUMN IF NOT EXISTS budget_currency TEXT DEFAULT 'UZS';
-    UPDATE expenses SET currency='UZS' WHERE currency IS NULL OR currency='so''m';
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(ddl)
-            # Eski davlat byudjetini bir marta shaharga koshamiz (faqat 1 ta shahari bor davlatlar uchun;
-            # bir nechta shahari borlarini foydalanuvchi /budget orqali ozi taqsimlaydi)
-            cur.execute("SELECT 1 FROM schema_migrations WHERE name=%s", ("city_budget_v1",))
-            if not cur.fetchone():
-                cur.execute(
-                    "UPDATE cities SET budget=co.budget, budget_period=co.budget_period, "
-                    "budget_currency=COALESCE(co.budget_currency, 'UZS') "
-                    "FROM countries co WHERE cities.country_id=co.id AND cities.budget IS NULL "
-                    "AND co.budget IS NOT NULL "
-                    "AND (SELECT COUNT(*) FROM cities c2 WHERE c2.country_id=co.id) = 1"
-                )
-                cur.execute("INSERT INTO schema_migrations (name) VALUES (%s)", ("city_budget_v1",))
 
 
 @contextmanager
@@ -160,10 +134,11 @@ def _run(query, params=()):
 
 # ---------- Countries ----------
 
-def add_country(user_id, name, status, notes=None):
+def add_country(user_id, name, status, budget=None, budget_period=None, notes=None):
     row = _one(
-        "INSERT INTO countries (user_id, name, status, notes) VALUES (%s,%s,%s,%s) RETURNING id",
-        (user_id, name, status, notes),
+        "INSERT INTO countries (user_id, name, status, budget, budget_period, notes) "
+        "VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+        (user_id, name, status, budget, budget_period, notes),
     )
     return row["id"]
 
@@ -183,28 +158,6 @@ def get_countries(user_id, status=None):
 
 def get_country(country_id):
     return _one("SELECT * FROM countries WHERE id=%s", (country_id,))
-
-
-# ---------- Egalik tekshiruvi (boshqa foydalanuvchi ID'sidan himoya) ----------
-
-def get_country_owned(user_id, country_id):
-    return _one("SELECT * FROM countries WHERE id=%s AND user_id=%s", (country_id, user_id))
-
-
-def get_city_owned(user_id, city_id):
-    return _one(
-        "SELECT ci.* FROM cities ci JOIN countries co ON ci.country_id=co.id "
-        "WHERE ci.id=%s AND co.user_id=%s",
-        (city_id, user_id),
-    )
-
-
-def get_place_owned(user_id, place_id):
-    return _one(
-        "SELECT p.* FROM places p JOIN cities ci ON p.city_id=ci.id "
-        "JOIN countries co ON ci.country_id=co.id WHERE p.id=%s AND co.user_id=%s",
-        (place_id, user_id),
-    )
 
 
 # ---------- Cities ----------
@@ -227,14 +180,6 @@ def get_cities(country_id):
 
 def get_city(city_id):
     return _one("SELECT * FROM cities WHERE id=%s", (city_id,))
-
-
-def set_city_budget(city_id, budget, currency, period):
-    """Shahar byudjetini belgilaydi. budget=None bo'lsa byudjet olib tashlanadi."""
-    _run(
-        "UPDATE cities SET budget=%s, budget_currency=%s, budget_period=%s WHERE id=%s",
-        (budget, currency or "UZS", period, city_id),
-    )
 
 
 # ---------- Active state ----------
@@ -272,7 +217,7 @@ def add_diary(city_id, entry_date, text, photo_file_id=None):
 
 
 def get_diary(city_id):
-    return _all("SELECT * FROM diary WHERE city_id=%s ORDER BY entry_date DESC, id DESC", (city_id,))
+    return _all("SELECT * FROM diary WHERE city_id=%s ORDER BY entry_date DESC", (city_id,))
 
 
 # ---------- Places ----------
@@ -330,52 +275,24 @@ def add_expense(city_id, category, amount, currency, expense_date, place_id, not
     )
 
 
-def get_expenses(city_id, limit=50):
-    return _all(
-        "SELECT e.*, p.name AS place_name FROM expenses e LEFT JOIN places p ON e.place_id=p.id "
-        "WHERE e.city_id=%s ORDER BY e.id DESC LIMIT %s",
-        (city_id, limit),
-    )
+def get_expenses(city_id):
+    return _all("SELECT * FROM expenses WHERE city_id=%s ORDER BY id DESC", (city_id,))
 
 
 def get_expense_summary(city_id):
     return _all(
-        "SELECT category, SUM(amount) AS total, currency FROM expenses "
-        "WHERE city_id=%s GROUP BY category, currency ORDER BY currency, SUM(amount) DESC",
+        "SELECT category, SUM(amount) as total, currency FROM expenses "
+        "WHERE city_id=%s GROUP BY category, currency",
         (city_id,),
     )
 
 
-def get_city_expense_totals(city_id):
-    return _all(
-        "SELECT currency, SUM(amount) AS total FROM expenses WHERE city_id=%s "
-        "GROUP BY currency ORDER BY currency",
-        (city_id,),
-    )
-
-
-def get_country_expense_totals(country_id):
-    return _all(
-        "SELECT e.currency, SUM(e.amount) AS total FROM expenses e JOIN cities ci ON e.city_id=ci.id "
-        "WHERE ci.country_id=%s GROUP BY e.currency ORDER BY e.currency",
+def get_country_expense_total(country_id):
+    row = _one(
+        "SELECT SUM(e.amount) s FROM expenses e JOIN cities ci ON e.city_id=ci.id WHERE ci.country_id=%s",
         (country_id,),
     )
-
-
-# ---------- Weather log ----------
-
-def add_weather(city_id, log_date, condition, temp, note):
-    _run(
-        "INSERT INTO weather_log (city_id, log_date, weather_type, temp, note) VALUES (%s,%s,%s,%s,%s)",
-        (city_id, log_date, condition, temp, note),
-    )
-
-
-def get_weather_log(city_id, limit=10):
-    return _all(
-        "SELECT * FROM weather_log WHERE city_id=%s ORDER BY log_date DESC, id DESC LIMIT %s",
-        (city_id, limit),
-    )
+    return float(row["s"] or 0)
 
 
 # ---------- Files ----------
@@ -400,33 +317,190 @@ def get_stats(user_id):
     wishlist_count = _one(
         "SELECT COUNT(*) c FROM countries WHERE user_id=%s AND status='wishlist'", (user_id,)
     )["c"]
+    total_row = _one(
+        "SELECT SUM(e.amount) s FROM expenses e JOIN cities ci ON e.city_id=ci.id "
+        "JOIN countries co ON ci.country_id=co.id WHERE co.user_id=%s",
+        (user_id,),
+    )
+    total_spent = float(total_row["s"] or 0)
     places_count = _one(
         "SELECT COUNT(*) c FROM places p JOIN cities ci ON p.city_id=ci.id "
         "JOIN countries co ON ci.country_id=co.id WHERE co.user_id=%s",
         (user_id,),
     )["c"]
-    base = (
-        "FROM expenses e JOIN cities ci ON e.city_id=ci.id "
+    top_category = _one(
+        "SELECT e.category, SUM(e.amount) total FROM expenses e JOIN cities ci ON e.city_id=ci.id "
         "JOIN countries co ON ci.country_id=co.id WHERE co.user_id=%s "
-    )
-    totals = _all(
-        "SELECT e.currency, SUM(e.amount) AS total " + base + "GROUP BY e.currency ORDER BY e.currency",
+        "GROUP BY e.category ORDER BY total DESC LIMIT 1",
         (user_id,),
     )
-    by_category = _all(
-        "SELECT e.currency, e.category, SUM(e.amount) AS total " + base + "GROUP BY e.currency, e.category",
+    most_expensive = _one(
+        "SELECT co.name, SUM(e.amount) total FROM expenses e JOIN cities ci ON e.city_id=ci.id "
+        "JOIN countries co ON ci.country_id=co.id WHERE co.user_id=%s "
+        "GROUP BY co.id, co.name ORDER BY total DESC LIMIT 1",
         (user_id,),
     )
-    by_country = _all(
-        "SELECT co.id, co.name, e.currency, SUM(e.amount) AS total " + base
-        + "GROUP BY co.id, co.name, e.currency",
+    cheapest = _one(
+        "SELECT co.name, SUM(e.amount) total FROM expenses e JOIN cities ci ON e.city_id=ci.id "
+        "JOIN countries co ON ci.country_id=co.id WHERE co.user_id=%s "
+        "GROUP BY co.id, co.name ORDER BY total ASC LIMIT 1",
         (user_id,),
     )
     return {
         "visited_count": visited_count,
         "wishlist_count": wishlist_count,
+        "total_spent": total_spent,
         "places_count": places_count,
-        "totals": totals,
-        "by_category": by_category,
-        "by_country": by_country,
+        "top_category": dict(top_category) if top_category else None,
+        "most_expensive": dict(most_expensive) if most_expensive else None,
+        "cheapest": dict(cheapest) if cheapest else None,
     }
+
+
+# ---------- Single-item getters (boshqaruv uchun) ----------
+
+def get_place(place_id):
+    return _one("SELECT * FROM places WHERE id=%s", (place_id,))
+
+
+def get_contact(contact_id):
+    return _one("SELECT * FROM contacts WHERE id=%s", (contact_id,))
+
+
+def get_diary_entry(diary_id):
+    return _one("SELECT * FROM diary WHERE id=%s", (diary_id,))
+
+
+def get_expense(expense_id):
+    return _one("SELECT * FROM expenses WHERE id=%s", (expense_id,))
+
+
+def get_file(file_id):
+    return _one("SELECT * FROM files WHERE id=%s", (file_id,))
+
+
+# ---------- Update (tahrirlash) ----------
+
+def update_country_name(country_id, name):
+    _run("UPDATE countries SET name=%s WHERE id=%s", (name, country_id))
+
+
+def update_country_status(country_id, status):
+    _run("UPDATE countries SET status=%s WHERE id=%s", (status, country_id))
+
+
+def update_country_budget(country_id, budget, budget_period):
+    _run("UPDATE countries SET budget=%s, budget_period=%s WHERE id=%s", (budget, budget_period, country_id))
+
+
+def update_country_notes(country_id, notes):
+    _run("UPDATE countries SET notes=%s WHERE id=%s", (notes, country_id))
+
+
+def update_city_name(city_id, name):
+    _run("UPDATE cities SET name=%s WHERE id=%s", (name, city_id))
+
+
+def update_place_price(place_id, price):
+    _run("UPDATE places SET price=%s WHERE id=%s", (price, place_id))
+
+
+def update_place_rating(place_id, rating):
+    _run("UPDATE places SET rating=%s WHERE id=%s", (rating, place_id))
+
+
+def update_place_notes(place_id, notes):
+    _run("UPDATE places SET notes=%s WHERE id=%s", (notes, place_id))
+
+
+def update_expense_amount(expense_id, amount):
+    _run("UPDATE expenses SET amount=%s WHERE id=%s", (amount, expense_id))
+
+
+def update_expense_note(expense_id, note):
+    _run("UPDATE expenses SET note=%s WHERE id=%s", (note, expense_id))
+
+
+def update_contact_info(contact_id, contact_info):
+    _run("UPDATE contacts SET contact_info=%s WHERE id=%s", (contact_info, contact_id))
+
+
+# ---------- Delete (o'chirish — CASCADE orqali ichidagilar ham o'chadi) ----------
+
+def delete_country(country_id):
+    _run("DELETE FROM countries WHERE id=%s", (country_id,))
+
+
+def delete_city(city_id):
+    _run("DELETE FROM cities WHERE id=%s", (city_id,))
+
+
+def delete_place(place_id):
+    _run("DELETE FROM places WHERE id=%s", (place_id,))
+
+
+def delete_contact(contact_id):
+    _run("DELETE FROM contacts WHERE id=%s", (contact_id,))
+
+
+def delete_diary_entry(diary_id):
+    _run("DELETE FROM diary WHERE id=%s", (diary_id,))
+
+
+def delete_expense(expense_id):
+    _run("DELETE FROM expenses WHERE id=%s", (expense_id,))
+
+
+def delete_file(file_id):
+    _run("DELETE FROM files WHERE id=%s", (file_id,))
+
+
+# ---------- Export (Excel uchun tekislangan ma'lumotlar) ----------
+
+def export_countries(user_id):
+    return _all(
+        "SELECT co.name, co.status, co.budget, co.budget_period, "
+        "(SELECT COUNT(*) FROM cities WHERE country_id=co.id) AS cities_count, "
+        "COALESCE((SELECT SUM(e.amount) FROM expenses e JOIN cities ci ON e.city_id=ci.id "
+        "WHERE ci.country_id=co.id), 0) AS total_spent "
+        "FROM countries co WHERE co.user_id=%s ORDER BY co.name",
+        (user_id,),
+    )
+
+
+def export_cities(user_id):
+    return _all(
+        "SELECT co.name AS country, ci.name AS city, "
+        "(SELECT COUNT(*) FROM places WHERE city_id=ci.id) AS places_count, "
+        "COALESCE((SELECT SUM(amount) FROM expenses WHERE city_id=ci.id), 0) AS total_spent "
+        "FROM cities ci JOIN countries co ON ci.country_id=co.id "
+        "WHERE co.user_id=%s ORDER BY co.name, ci.name",
+        (user_id,),
+    )
+
+
+def export_places(user_id):
+    return _all(
+        "SELECT co.name AS country, ci.name AS city, p.name, p.type, p.is_halal, p.price, p.rating, p.address "
+        "FROM places p JOIN cities ci ON p.city_id=ci.id JOIN countries co ON ci.country_id=co.id "
+        "WHERE co.user_id=%s ORDER BY co.name, ci.name, p.name",
+        (user_id,),
+    )
+
+
+def export_expenses(user_id):
+    return _all(
+        "SELECT co.name AS country, ci.name AS city, e.expense_date, e.category, e.amount, e.currency, e.note "
+        "FROM expenses e JOIN cities ci ON e.city_id=ci.id JOIN countries co ON ci.country_id=co.id "
+        "WHERE co.user_id=%s ORDER BY co.name, ci.name, e.expense_date",
+        (user_id,),
+    )
+
+
+def export_diary(user_id):
+    return _all(
+        "SELECT co.name AS country, ci.name AS city, d.entry_date, d.text "
+        "FROM diary d JOIN cities ci ON d.city_id=ci.id JOIN countries co ON ci.country_id=co.id "
+        "WHERE co.user_id=%s ORDER BY co.name, ci.name, d.entry_date",
+        (user_id,),
+    )

@@ -1,3 +1,4 @@
 aiogram>=3.13.0
 psycopg2-binary>=2.9
 aiohttp>=3.9
+openpyxl>=3.1
