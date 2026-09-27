@@ -1,3 +1,5 @@
+import secrets
+
 import psycopg2
 import psycopg2.extras
 
@@ -103,6 +105,11 @@ def init_db():
         conditions TEXT,
         custom_text TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS web_tokens (
+        user_id BIGINT PRIMARY KEY,
+        token TEXT UNIQUE NOT NULL
+    );
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -130,6 +137,26 @@ def _run(query, params=()):
             if cur.description:
                 return cur.fetchone()
             return None
+
+
+# ---------- Web token (sayt uchun shaxsiy havola) ----------
+
+def get_or_create_web_token(user_id):
+    row = _one("SELECT token FROM web_tokens WHERE user_id=%s", (user_id,))
+    if row:
+        return row["token"]
+    token = secrets.token_urlsafe(16)
+    _run(
+        "INSERT INTO web_tokens (user_id, token) VALUES (%s,%s) "
+        "ON CONFLICT (user_id) DO UPDATE SET token=EXCLUDED.token",
+        (user_id, token),
+    )
+    return token
+
+
+def get_user_id_by_token(token):
+    row = _one("SELECT user_id FROM web_tokens WHERE token=%s", (token,))
+    return row["user_id"] if row else None
 
 
 # ---------- Countries ----------
@@ -256,7 +283,6 @@ def get_active_trip(user_id):
 
 
 def get_active_trip_full(user_id):
-    """Faol safar + shahar + davlat, bittada."""
     trip = get_active_trip(user_id)
     if not trip:
         return None, None, None
@@ -265,7 +291,7 @@ def get_active_trip_full(user_id):
     return trip, city, country
 
 
-# ---------- Places (shaharga bog'langan, safarlar orasida umumiy) ----------
+# ---------- Places ----------
 
 def add_place(city_id, name, ptype, is_halal, price, rating, address, latitude, longitude, notes):
     return _run(
@@ -314,7 +340,7 @@ def delete_place(place_id):
     _run("DELETE FROM places WHERE id=%s", (place_id,))
 
 
-# ---------- Contacts (safarga bog'langan) ----------
+# ---------- Contacts ----------
 
 def add_contact(trip_id, name, contact_info, notes):
     return _run(
@@ -339,7 +365,7 @@ def delete_contact(contact_id):
     _run("DELETE FROM contacts WHERE id=%s", (contact_id,))
 
 
-# ---------- Expenses (safarga bog'langan, 2 valyutada) ----------
+# ---------- Expenses ----------
 
 def add_expense(trip_id, category, amount, currency, expense_date, note):
     return _run(
@@ -354,7 +380,6 @@ def get_expenses(trip_id):
 
 
 def get_expense_summary(trip_id):
-    """Kategoriya + valyuta bo'yicha guruhlangan jami."""
     return _all(
         "SELECT category, currency, SUM(amount) AS total FROM expenses "
         "WHERE trip_id=%s GROUP BY category, currency ORDER BY category",
@@ -363,7 +388,6 @@ def get_expense_summary(trip_id):
 
 
 def get_expense_totals_by_currency(trip_id):
-    """Valyuta bo'yicha jami (barcha kategoriyalar)."""
     return _all(
         "SELECT currency, SUM(amount) AS total FROM expenses WHERE trip_id=%s GROUP BY currency",
         (trip_id,),
@@ -386,7 +410,7 @@ def delete_expense(expense_id):
     _run("DELETE FROM expenses WHERE id=%s", (expense_id,))
 
 
-# ---------- Files (safarga bog'langan) ----------
+# ---------- Files ----------
 
 def add_file(trip_id, file_id, file_type, file_name, notes):
     return _run(
@@ -408,7 +432,7 @@ def delete_file(file_id):
     _run("DELETE FROM files WHERE id=%s", (file_id,))
 
 
-# ---------- Diary (safarga bog'langan) ----------
+# ---------- Diary ----------
 
 def add_diary(trip_id, entry_date, text, photo_file_id=None):
     return _run(
@@ -429,7 +453,7 @@ def delete_diary_entry(diary_id):
     _run("DELETE FROM diary WHERE id=%s", (diary_id,))
 
 
-# ---------- Weather notes (safarga bog'langan, qo'lda kiritiladi) ----------
+# ---------- Weather notes ----------
 
 def add_weather_note(trip_id, entry_date, conditions, custom_text):
     return _run(
@@ -480,7 +504,6 @@ def get_stats(user_id):
 
 
 def get_all_trips_for_user(user_id):
-    """Har bir safar + uning shahar/davlat nomi bilan, statistikalar uchun."""
     return _all(
         "SELECT t.*, ci.name AS city_name, co.name AS country_name "
         "FROM trips t JOIN cities ci ON t.city_id=ci.id JOIN countries co ON ci.country_id=co.id "
