@@ -2685,7 +2685,7 @@ NETLIFY_SITE_URL = "https://SIZNING-SAYTINGIZ.netlify.app"
 @router.message(Command("mysite"))
 async def cmd_mysite(message: Message):
     token = db.get_or_create_web_token(message.from_user.id)
-    link = f"{NETLIFY_SITE_URL}/?token={token}"
+    link = f"{https://mytravel-site.netlify.app/}/?token={token}"
     await message.answer(
         "🔗 Sizning shaxsiy saytingiz:\n"
         f"{link}\n\n"
