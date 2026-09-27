@@ -2,12 +2,29 @@ import os
 import json
 import hmac
 import hashlib
+from decimal import Decimal
+from datetime import date, datetime
 from urllib.parse import parse_qsl
 
 from aiohttp import web
 
 from config import BOT_TOKEN
 import database as db
+
+
+def _json_default(obj):
+    """Postgres'dan keladigan NUMERIC va TIMESTAMP qiymatlarini JSON'ga o'giradi."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    raise TypeError(f"Not JSON serializable: {obj!r}")
+
+
+def json_response(data, status=200):
+    return web.json_response(
+        data, status=status, dumps=lambda d: json.dumps(d, default=_json_default)
+    )
 
 
 # ---------- Telegram WebApp initData tekshiruvi ----------
@@ -43,7 +60,7 @@ def auth_required(handler):
     async def wrapper(request):
         user_id = get_user_id(request)
         if user_id is None:
-            return web.json_response({"error": "unauthorized"}, status=401)
+            return json_response({"error": "unauthorized"}, status=401)
         request["user_id"] = user_id
         return await handler(request)
     return wrapper
@@ -70,7 +87,7 @@ async def api_overview(request):
             trips = db.get_trips(city["id"])
             city_list.append({**city, "trips": trips})
         result.append({**c, "cities": city_list})
-    return web.json_response({"stats": stats, "countries": result})
+    return json_response({"stats": stats, "countries": result})
 
 
 # ---------- API: bitta safar detali ----------
@@ -80,14 +97,14 @@ async def api_trip_detail(request):
     trip_id = int(request.match_info["trip_id"])
     trip = db.get_trip(trip_id)
     if not trip:
-        return web.json_response({"error": "not_found"}, status=404)
+        return json_response({"error": "not_found"}, status=404)
     city = db.get_city(trip["city_id"])
     country = db.get_country(city["country_id"])
     # xavfsizlik: bu safar shu foydalanuvchiga tegishli ekanini tekshirish
     if country["user_id"] != request["user_id"]:
-        return web.json_response({"error": "forbidden"}, status=403)
+        return json_response({"error": "forbidden"}, status=403)
 
-    return web.json_response({
+    return json_response({
         "trip": trip,
         "city": city,
         "country": country,
@@ -108,11 +125,11 @@ async def api_add_expense(request):
     trip_id = int(request.match_info["trip_id"])
     trip = db.get_trip(trip_id)
     if not trip:
-        return web.json_response({"error": "not_found"}, status=404)
+        return json_response({"error": "not_found"}, status=404)
     city = db.get_city(trip["city_id"])
     country = db.get_country(city["country_id"])
     if country["user_id"] != request["user_id"]:
-        return web.json_response({"error": "forbidden"}, status=403)
+        return json_response({"error": "forbidden"}, status=403)
 
     body = await request.json()
     row = db.add_expense(
@@ -123,7 +140,7 @@ async def api_add_expense(request):
         body.get("date", ""),
         body.get("note", ""),
     )
-    return web.json_response({"ok": True, "expense": row})
+    return json_response({"ok": True, "expense": row})
 
 
 # ---------- API: kundalik yozuv qo'shish ----------
@@ -133,15 +150,15 @@ async def api_add_diary(request):
     trip_id = int(request.match_info["trip_id"])
     trip = db.get_trip(trip_id)
     if not trip:
-        return web.json_response({"error": "not_found"}, status=404)
+        return json_response({"error": "not_found"}, status=404)
     city = db.get_city(trip["city_id"])
     country = db.get_country(city["country_id"])
     if country["user_id"] != request["user_id"]:
-        return web.json_response({"error": "forbidden"}, status=403)
+        return json_response({"error": "forbidden"}, status=403)
 
     body = await request.json()
     row = db.add_diary(trip_id, body.get("date", ""), body.get("text", ""))
-    return web.json_response({"ok": True, "diary": row})
+    return json_response({"ok": True, "diary": row})
 
 
 # ---------- Mini App sahifasi (frontend shu yerda, alohida fayl shart emas) ----------
