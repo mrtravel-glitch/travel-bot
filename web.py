@@ -199,7 +199,11 @@ async function api(path, opts = {}) {
       ...(opts.headers || {}),
     },
   });
-  if (!res.ok) throw new Error("Xatolik: " + res.status);
+  if (!res.ok) {
+    let detail = "";
+    try { const j = await res.json(); detail = j.error || JSON.stringify(j); } catch (_) {}
+    throw new Error(res.status + (detail ? " — " + detail : ""));
+  }
   return res.json();
 }
 
@@ -226,7 +230,7 @@ async function renderOverview() {
     if (data.countries.length === 0) html += `<p class="hint">Hali safar qo'shilmagan. Botda /trip_add buyrug'ini yuboring.</p>`;
     root.innerHTML = html;
   } catch (e) {
-    root.innerHTML = `<p class="hint">Ma'lumot yuklanmadi. Botni Telegram ichidan oching.</p>`;
+    root.innerHTML = `<p class="hint">Xatolik: ${e.message}</p><p class="hint">initData uzunligi: ${initData.length}</p>`;
   }
 }
 
