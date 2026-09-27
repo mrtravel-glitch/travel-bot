@@ -2674,3 +2674,21 @@ async def mg_text_input(message: Message, state: FSMContext):
     await state.set_state(None)
     await message.answer("✅ Saqlandi")
     await MANAGE_RENDERERS[kind](message, **kwargs)
+
+# Buni handlers.py ichiga, boshqa @router.message(Command("...")) larning
+# yoniga (masalan cmd_help funksiyasidan keyin) qo'shing.
+# NETLIFY_SITE_URL ni haqiqiy Netlify manzilingizga almashtiring.
+
+NETLIFY_SITE_URL = "https://SIZNING-SAYTINGIZ.netlify.app"
+
+
+@router.message(Command("mysite"))
+async def cmd_mysite(message: Message):
+    token = db.get_or_create_web_token(message.from_user.id)
+    link = f"{NETLIFY_SITE_URL}/?token={token}"
+    await message.answer(
+        "🔗 Sizning shaxsiy saytingiz:\n"
+        f"{link}\n\n"
+        "⚠️ Bu havolani hech kimga yubormang — kim havolani bilsa, "
+        "sizning barcha safar ma'lumotlaringizni ko'ra oladi."
+    )
