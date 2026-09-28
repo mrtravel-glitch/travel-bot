@@ -262,7 +262,7 @@ async def cors_middleware(request, handler):
 
 
 async def start_web_server():
-    app = web.Application(middlewares=[cors_middleware])
+    app = web.Application(middlewares=[cors_middleware], client_max_size=8 * 1024 * 1024)
     app.router.add_get("/", handle_ping)
 
     app.router.add_get("/api/overview", api_overview)
