@@ -13,7 +13,16 @@ def get_conn():
 
 
 def init_db():
-    ddl = """
+    ddl = CREATE TABLE IF NOT EXISTS web_tokens (
+    user_id BIGINT PRIMARY KEY,
+    token TEXT UNIQUE NOT NULL
+);
+
+ALTER TABLE cities ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
+ALTER TABLE cities ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
+ALTER TABLE cities ADD COLUMN IF NOT EXISTS photo TEXT;
+ALTER TABLE countries ADD COLUMN IF NOT EXISTS photo TEXT;
+"""
     CREATE TABLE IF NOT EXISTS countries (
         id SERIAL PRIMARY KEY,
         user_id BIGINT NOT NULL,
@@ -602,3 +611,13 @@ def export_weather(user_id, country_id=None, city_id=None, trip_id=None):
 
 def export_files(user_id, country_id=None, city_id=None, trip_id=None):
     return _trip_scoped_export("files", user_id, country_id, city_id, trip_id)
+
+# ---------- Xarita: koordinata va rasmlar ----------
+def update_city_coords(city_id, lat, lng):
+    _run("UPDATE cities SET latitude=%s, longitude=%s WHERE id=%s", (lat, lng, city_id))
+
+def update_city_photo(city_id, photo):
+    _run("UPDATE cities SET photo=%s WHERE id=%s", (photo, city_id))
+
+def update_country_photo(country_id, photo):
+    _run("UPDATE countries SET photo=%s WHERE id=%s", (photo, country_id))
