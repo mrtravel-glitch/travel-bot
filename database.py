@@ -11,30 +11,18 @@ def get_conn():
     conn.autocommit = True
     return conn
 
-
-def init_db():
-    ddl = CREATE TABLE IF NOT EXISTS web_tokens (
-    user_id BIGINT PRIMARY KEY,
-    token TEXT UNIQUE NOT NULL
-);
-
-ALTER TABLE cities ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
-ALTER TABLE cities ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
-ALTER TABLE cities ADD COLUMN IF NOT EXISTS photo TEXT;
-ALTER TABLE countries ADD COLUMN IF NOT EXISTS photo TEXT;
-"""
+    def init_db():
+    ddl = """
     CREATE TABLE IF NOT EXISTS countries (
         id SERIAL PRIMARY KEY,
         user_id BIGINT NOT NULL,
         name TEXT NOT NULL
     );
-
     CREATE TABLE IF NOT EXISTS cities (
         id SERIAL PRIMARY KEY,
         country_id INTEGER NOT NULL REFERENCES countries(id) ON DELETE CASCADE,
         name TEXT NOT NULL
     );
-
     CREATE TABLE IF NOT EXISTS trips (
         id SERIAL PRIMARY KEY,
         city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
@@ -46,12 +34,10 @@ ALTER TABLE countries ADD COLUMN IF NOT EXISTS photo TEXT;
         exchange_rate NUMERIC,
         created_at TIMESTAMP DEFAULT now()
     );
-
     CREATE TABLE IF NOT EXISTS user_state (
         user_id BIGINT PRIMARY KEY,
         active_trip_id INTEGER
     );
-
     CREATE TABLE IF NOT EXISTS places (
         id SERIAL PRIMARY KEY,
         city_id INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
@@ -65,13 +51,11 @@ ALTER TABLE countries ADD COLUMN IF NOT EXISTS photo TEXT;
         longitude DOUBLE PRECISION,
         notes TEXT
     );
-
     CREATE TABLE IF NOT EXISTS place_photos (
         id SERIAL PRIMARY KEY,
         place_id INTEGER NOT NULL REFERENCES places(id) ON DELETE CASCADE,
         photo_file_id TEXT NOT NULL
     );
-
     CREATE TABLE IF NOT EXISTS contacts (
         id SERIAL PRIMARY KEY,
         trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
@@ -79,7 +63,6 @@ ALTER TABLE countries ADD COLUMN IF NOT EXISTS photo TEXT;
         contact_info TEXT,
         notes TEXT
     );
-
     CREATE TABLE IF NOT EXISTS expenses (
         id SERIAL PRIMARY KEY,
         trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
@@ -89,7 +72,6 @@ ALTER TABLE countries ADD COLUMN IF NOT EXISTS photo TEXT;
         expense_date TEXT,
         note TEXT
     );
-
     CREATE TABLE IF NOT EXISTS files (
         id SERIAL PRIMARY KEY,
         trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
@@ -98,7 +80,6 @@ ALTER TABLE countries ADD COLUMN IF NOT EXISTS photo TEXT;
         file_name TEXT,
         notes TEXT
     );
-
     CREATE TABLE IF NOT EXISTS diary (
         id SERIAL PRIMARY KEY,
         trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
@@ -106,7 +87,6 @@ ALTER TABLE countries ADD COLUMN IF NOT EXISTS photo TEXT;
         text TEXT,
         photo_file_id TEXT
     );
-
     CREATE TABLE IF NOT EXISTS weather_notes (
         id SERIAL PRIMARY KEY,
         trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
@@ -114,16 +94,18 @@ ALTER TABLE countries ADD COLUMN IF NOT EXISTS photo TEXT;
         conditions TEXT,
         custom_text TEXT
     );
-
     CREATE TABLE IF NOT EXISTS web_tokens (
         user_id BIGINT PRIMARY KEY,
         token TEXT UNIQUE NOT NULL
     );
+    ALTER TABLE cities ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
+    ALTER TABLE cities ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
+    ALTER TABLE cities ADD COLUMN IF NOT EXISTS photo TEXT;
+    ALTER TABLE countries ADD COLUMN IF NOT EXISTS photo TEXT;
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(ddl)
-
 
 def _one(query, params=()):
     with get_conn() as conn:
