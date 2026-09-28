@@ -264,7 +264,6 @@ async def cors_middleware(request, handler):
 async def start_web_server():
     app = web.Application(middlewares=[cors_middleware], client_max_size=8 * 1024 * 1024)
     app.router.add_get("/", handle_ping)
-
     app.router.add_get("/api/overview", api_overview)
     app.router.add_post("/api/country", api_add_country)
     app.router.add_post("/api/city", api_add_city)
@@ -276,15 +275,15 @@ async def start_web_server():
     app.router.add_post("/api/trip/{trip_id}/contact", api_add_contact)
     app.router.add_post("/api/trip/{trip_id}/weather", api_add_weather)
     app.router.add_post("/api/city/{city_id}/coords", api_city_coords)
-app.router.add_post("/api/city/{city_id}/photo", api_city_photo)
-app.router.add_post("/api/country/{country_id}/photo", api_country_photo)
+    app.router.add_post("/api/city/{city_id}/photo", api_city_photo)
+    app.router.add_post("/api/country/{country_id}/photo", api_country_photo)
 
     for path in ["/api/country", "/api/city", "/api/trip"]:
         app.router.add_route("OPTIONS", path, preflight)
-    for path in ["/api/city/{city_id}/coords", "/api/city/{city_id}/photo", "/api/country/{country_id}/photo"]:
-        app.router.add_route("OPTIONS", path, preflight)
     for sub in ["expense", "diary", "place", "contact", "weather"]:
         app.router.add_route("OPTIONS", "/api/trip/{trip_id}/" + sub, preflight)
+    for path in ["/api/city/{city_id}/coords", "/api/city/{city_id}/photo", "/api/country/{country_id}/photo"]:
+        app.router.add_route("OPTIONS", path, preflight)
 
     runner = web.AppRunner(app)
     await runner.setup()
