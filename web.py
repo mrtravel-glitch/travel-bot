@@ -217,7 +217,33 @@ async def api_add_weather(request):
     row = db.add_weather_note(trip_id, body.get("date", ""), body.get("conditions"), body.get("custom_text"))
     return json_response({"ok": True, "weather": row})
 
+# ---------- Xarita: koordinata va rasmlar ----------
+@auth_required
+async def api_city_coords(request):
+    city_id = int(request.match_info["city_id"])
+    if not owns_city(request["user_id"], city_id):
+        return json_response({"error": "forbidden"}, status=403)
+    body = await request.json()
+    db.update_city_coords(city_id, body.get("latitude"), body.get("longitude"))
+    return json_response({"ok": True})
 
+@auth_required
+async def api_city_photo(request):
+    city_id = int(request.match_info["city_id"])
+    if not owns_city(request["user_id"], city_id):
+        return json_response({"error": "forbidden"}, status=403)
+    body = await request.json()
+    db.update_city_photo(city_id, body.get("photo"))
+    return json_response({"ok": True})
+
+@auth_required
+async def api_country_photo(request):
+    country_id = int(request.match_info["country_id"])
+    if not owns_country(request["user_id"], country_id):
+        return json_response({"error": "forbidden"}, status=403)
+    body = await request.json()
+    db.update_country_photo(country_id, body.get("photo"))
+    return json_response({"ok": True})
 # ---------- CORS middleware ----------
 
 @web.middleware
