@@ -2692,3 +2692,14 @@ async def cmd_mysite(message: Message):
         "⚠️ Bu havolani hech kimga yubormang — kim havolani bilsa, "
         "sizning barcha safar ma'lumotlaringizni ko'ra oladi."
     )
+
+SITE_URL = "https://claude.ai/artifact/HfRhGJvW5jc1HBy1HijU6x"
+
+@router.message(Command("web"))
+async def cmd_web(message: Message):
+    token = db.get_or_create_web_token(message.from_user.id)
+    link = f"{SITE_URL}?token={token}"
+    await message.answer(
+        "🌐 Shaxsiy saytingiz tayyor. Bosing va saqlab qo'ying — "
+        "keyingi safar qayta so'ramaydi:\n\n" + link
+    )
