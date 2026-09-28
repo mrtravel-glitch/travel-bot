@@ -2693,7 +2693,7 @@ async def cmd_mysite(message: Message):
         "sizning barcha safar ma'lumotlaringizni ko'ra oladi."
     )
 
-SITE_URL = "https://claude.ai/artifact/HfRhGJvW5jc1HBy1HijU6x"
+SITE_URL = "https://myy-travel-site.netlify.app"
 
 @router.message(Command("web"))
 async def cmd_web(message: Message):
