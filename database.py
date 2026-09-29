@@ -1,5 +1,4 @@
 import secrets
-
 import psycopg2
 import psycopg2.extras
 
@@ -11,7 +10,8 @@ def get_conn():
     conn.autocommit = True
     return conn
 
-    def init_db():
+
+def init_db():
     ddl = """
     CREATE TABLE IF NOT EXISTS countries (
         id SERIAL PRIMARY KEY,
@@ -106,6 +106,7 @@ def get_conn():
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(ddl)
+
 
 def _one(query, params=()):
     with get_conn() as conn:
@@ -466,6 +467,20 @@ def delete_weather_note(weather_id):
     _run("DELETE FROM weather_notes WHERE id=%s", (weather_id,))
 
 
+# ---------- Xarita: koordinata va rasmlar ----------
+
+def update_city_coords(city_id, lat, lng):
+    _run("UPDATE cities SET latitude=%s, longitude=%s WHERE id=%s", (lat, lng, city_id))
+
+
+def update_city_photo(city_id, photo):
+    _run("UPDATE cities SET photo=%s WHERE id=%s", (photo, city_id))
+
+
+def update_country_photo(country_id, photo):
+    _run("UPDATE countries SET photo=%s WHERE id=%s", (photo, country_id))
+
+
 # ---------- Stats ----------
 
 def get_stats(user_id):
@@ -593,13 +608,3 @@ def export_weather(user_id, country_id=None, city_id=None, trip_id=None):
 
 def export_files(user_id, country_id=None, city_id=None, trip_id=None):
     return _trip_scoped_export("files", user_id, country_id, city_id, trip_id)
-
-# ---------- Xarita: koordinata va rasmlar ----------
-def update_city_coords(city_id, lat, lng):
-    _run("UPDATE cities SET latitude=%s, longitude=%s WHERE id=%s", (lat, lng, city_id))
-
-def update_city_photo(city_id, photo):
-    _run("UPDATE cities SET photo=%s WHERE id=%s", (photo, city_id))
-
-def update_country_photo(country_id, photo):
-    _run("UPDATE countries SET photo=%s WHERE id=%s", (photo, country_id))
